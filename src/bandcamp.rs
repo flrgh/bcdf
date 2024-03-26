@@ -1,6 +1,6 @@
 use scraper::{Html, Selector};
-use serde_json as json;
 use serde::Deserialize;
+use serde_json as json;
 
 use crate::types::Track;
 
@@ -23,16 +23,15 @@ pub(crate) struct PlayerInfo {
 
 impl PlayerInfo {
     pub(crate) fn get_track(&self) -> Option<Track> {
-        self.tracklist.iter()
-            .find(|&ti| {
-                ti.track_number == self.featured_track_number
-            })
-            .map(|ti| {
-                Track {
-                    title: ti.track_title.to_owned(),
-                    artist: ti.artist.to_owned(),
-                    album: self.title.to_owned(),
-                }
+        self.tracklist
+            .iter()
+            .find(|&ti| ti.track_number == self.featured_track_number)
+            .map(|ti| Track {
+                title: ti.track_title.to_owned(),
+                artist: ti.artist.to_owned(),
+                album: self.title.to_owned(),
+                duration: chrono::Duration::try_seconds(ti.audio_track_duration as i64).unwrap(),
+                number: ti.track_number,
             })
     }
 }
@@ -51,9 +50,7 @@ fn get_meta(doc: &Html, name: &str) -> Option<String> {
     let title = Selector::parse(&format!(r#"meta[property="{name}"]"#)).unwrap();
 
     doc.select(&title)
-        .map(|elem| {
-            elem.attr("content").unwrap().to_owned()
-        })
+        .map(|elem| elem.attr("content").unwrap().to_owned())
         .next()
 }
 
