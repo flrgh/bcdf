@@ -1,5 +1,6 @@
 use std::cmp;
 
+use chrono::TimeDelta;
 use rspotify::model::{Country, IncludeExternal, Market, SearchResult, SearchType};
 use rspotify::prelude::*;
 use rspotify::{ClientCredsSpotify, Credentials};
@@ -16,7 +17,7 @@ type Client = ClientCredsSpotify;
 const MARKET: Market = Market::Country(Country::UnitedStates);
 
 fn normalize(s: &str) -> String {
-    s.to_lowercase()
+    s.to_lowercase().split(" ").collect::<Vec<&str>>().join(" ")
 }
 
 #[derive(Debug)]
@@ -31,19 +32,20 @@ impl StringMatcher {
     fn new(s: &str) -> Self {
         let s = normalize(s);
         let atom = Atom::new(
-                &s,
-                CaseMatching::Ignore,
-                Normalization::Smart,
-                AtomKind::Fuzzy,
-                true,
-            );
+            &s,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            AtomKind::Fuzzy,
+            true,
+        );
 
         let mut matcher = Matcher::new(Config::DEFAULT);
         let mut buf = Vec::new();
 
         let max = {
             let haystack = Utf32Str::new(&s, &mut buf);
-            atom.score(haystack, &mut matcher).expect("wtf this should always match")
+            atom.score(haystack, &mut matcher)
+                .expect("wtf this should always match")
         };
 
         Self {
@@ -81,7 +83,9 @@ impl TrackMatcher {
     }
 
     fn score(&mut self, result: &rspotify::model::FullTrack) -> u16 {
-        let artist = result.artists.iter()
+        let artist = result
+            .artists
+            .iter()
             .map(|art| {
                 let s = self.artist.score(&art.name);
                 println!("artist: {}, score: {}/{}", art.name, s, self.artist.max);
@@ -93,8 +97,14 @@ impl TrackMatcher {
         let title = self.title.score(&result.name);
         let album = self.album.score(&result.album.name);
 
-        println!("track: {}, score: {}/{}", result.name, title, self.title.max);
-        println!("album: {}, score: {}/{}", result.album.name, album, self.album.max);
+        println!(
+            "track: {}, score: {}/{}",
+            result.name, title, self.title.max
+        );
+        println!(
+            "album: {}, score: {}/{}",
+            result.album.name, album, self.album.max
+        );
 
         let mut tracknum = 0;
         if (self.album.max - album) < 50 && result.track_number == (self.number as u32) {
@@ -109,10 +119,7 @@ impl TrackMatcher {
     }
 
     fn max_possible(&self) -> u16 {
-        (self.title.max * 10)
-        + (self.artist.max * 8)
-        + (self.album.max * 5)
-        + (255 * 1)
+        (self.title.max * 10) + (self.artist.max * 8) + (self.album.max * 5) + (255 * 1)
     }
 }
 
@@ -129,7 +136,7 @@ struct ResultScore {
     artist_match: bool,
     album_match: bool,
     number_match: bool,
-    duration_diff: chrono::TimeDelta,
+    duration_diff: TimeDelta,
 }
 
 impl std::fmt::Display for ResultScore {
@@ -156,12 +163,14 @@ impl ResultScore {
 
         let album_match = track.album == result.album.name;
 
+        let diff = (TimeDelta::from_std(track.duration).unwrap() - result.duration).abs();
+
         let rs = Self {
             title_match: track.title == result.name,
             artist_match: artist.is_some(),
             album_match: album_match,
             number_match: album_match && (track.number as u32 == result.track_number),
-            duration_diff: (track.duration - result.duration).abs(),
+            duration_diff: (TimeDelta::from_std(track.duration).unwrap() - result.duration).abs(),
         };
 
         println!(

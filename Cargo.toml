@@ -6,9 +6,12 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-chrono = "0.4.35"
+anyhow = "1.0.81"
+chrono = { version = "0.4.35", features = ["serde"] }
+futures = "0.3.30"
 musicbrainz_rs = { version = "0.5.0", default-features = false, features = ["async"] }
 nucleo-matcher = "0.3.1"
+reqwest = { version = "0.12.3", features = ["stream"] }
 rspotify = "0.13.0"
 scraper = "0.19.0"
 serde = "1.0.197"
