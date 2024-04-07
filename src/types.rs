@@ -33,7 +33,8 @@ pub(crate) struct Track {
 
 impl Track {
     pub(crate) fn filename(&self) -> PathBuf {
-        let fname = format!("{:02} - {} - {}.mp3", self.bandcamp_playlist_track_number, self.artist.name, self.title);
+        let title = self.title.replace('/', "_");
+        let fname = format!("{:02} - {} - {}.mp3", self.bandcamp_playlist_track_number, self.artist.name, title);
         println!("{fname}");
         PathBuf::from(fname)
     }
