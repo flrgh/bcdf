@@ -13,6 +13,9 @@ pub(crate) struct TrackInfo {
     pub(crate) track_number: usize,
     pub(crate) track_title: String,
     pub(crate) audio_url: std::collections::BTreeMap<String, String>,
+
+    pub(crate) album_id: u64,
+    pub(crate) track_id: u64,
 }
 
 impl TrackInfo {
@@ -21,32 +24,47 @@ impl TrackInfo {
     }
 }
 
-impl Track {
-    fn from(ti: &TrackInfo, album: &str) -> Self {
-        Self {
-            title: ti.track_title.to_owned(),
-            artist: ti.artist.to_owned(),
-            album: album.to_owned(),
-            duration: ti.audio_track_duration,
-            number: ti.track_number,
-            download_url: ti.download_url(),
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PlayerInfo {
     pub(crate) title: String,
     pub(crate) tracklist: Vec<TrackInfo>,
     pub(crate) featured_track_number: usize,
+
+    pub(crate) band_name: String,
+    pub(crate) band_id: Option<u64>,
+    pub(crate) band_location: Option<String>,
+    pub(crate) band_url: Option<String>,
+    pub(crate) tralbum_url: Option<String>,
 }
 
 impl PlayerInfo {
-    pub(crate) fn get_track(&self) -> Option<Track> {
+    pub(crate) fn get_track(&self, playlist_index: usize) -> Option<Track> {
         self.tracklist
             .iter()
             .find(|&ti| ti.track_number == self.featured_track_number)
-            .map(|ti| Track::from(ti, &self.title))
+            .map(|ti| {
+                Track {
+                    title: ti.track_title.clone(),
+                    artist: crate::types::Artist {
+                        name: self.band_name.clone(),
+                        bandcamp_id: self.band_id.map(|id| id.to_string()),
+                        bandcamp_url: self.band_url.clone(),
+                        spotify_id: None,
+                    },
+                    album: crate::types::Album {
+                        title: self.title.clone(),
+                        bandcamp_id: Some(ti.album_id.to_string()),
+                        bandcamp_url: self.tralbum_url.clone(),
+                        spotify_id: None,
+                    },
+                    duration: ti.audio_track_duration,
+                    number: ti.track_number,
+                    download_url: ti.download_url(),
+                    bandcamp_track_id: Some(ti.track_id.to_string()),
+                    spotify_id: None,
+                    bandcamp_playlist_track_number: playlist_index,
+                }
+            })
     }
 }
 
@@ -78,13 +96,17 @@ impl BlogInfo {
         let mut tracks = vec![];
         let mut raw: Vec<json::Value> = vec![];
 
+        let mut idx = 0;
+
         for elem in doc.select(&article) {
             if let Some(infos) = elem.attr("data-player-infos") {
                 raw.push(json::from_str(infos).unwrap());
 
                 let parsed: Vec<PlayerInfo> = json::from_str(infos).unwrap();
                 for info in parsed.iter() {
-                    if let Some(track) = info.get_track() {
+                    idx += 1;
+                    if let Some(mut track) = info.get_track(idx) {
+                        track.bandcamp_playlist_track_number = idx;
                         tracks.push(track.clone());
                     }
                 }
@@ -106,5 +128,16 @@ impl BlogInfo {
             tracks,
             raw,
         }
+    }
+
+    pub(crate) async fn try_from_url(url: &str) -> anyhow::Result<Self> {
+        let bytes = reqwest::get(url)
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+
+        let html = String::from_utf8(bytes.to_vec())?;
+        Ok(Self::from_html(&html))
     }
 }

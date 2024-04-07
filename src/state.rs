@@ -36,7 +36,7 @@ impl State {
     pub(crate) fn try_get_or_create(info: BlogInfo) -> anyhow::Result<Self> {
         let path = Self::filename(&info);
 
-        let state: State = match std::fs::File::open(&path) {
+        let mut state: State = match std::fs::File::open(&path) {
             Ok(fh) => json::from_reader(fh)?,
             Err(_) => {
                 std::fs::create_dir_all(path.parent().unwrap())?;
@@ -47,10 +47,16 @@ impl State {
             }
         };
 
+        state.fname = path;
+
         Ok(state)
     }
 
     pub(crate) fn dirname(&self) -> PathBuf {
+        if self.fname.parent().is_none() {
+            eprintln!("what the fuck: {}", self.fname.to_string_lossy());
+        }
+
         self.fname.parent().unwrap().to_path_buf()
     }
 }

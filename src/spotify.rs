@@ -76,8 +76,8 @@ impl TrackMatcher {
     fn new(track: &types::Track) -> Self {
         Self {
             title: StringMatcher::new(&track.title),
-            artist: StringMatcher::new(&track.artist),
-            album: StringMatcher::new(&track.album),
+            artist: StringMatcher::new(&track.artist.name),
+            album: StringMatcher::new(&track.album.title),
             number: track.number,
         }
     }
@@ -158,10 +158,10 @@ impl ResultScore {
         let artist = result
             .artists
             .iter()
-            .find(|&art| art.name == track.artist)
+            .find(|&art| art.name == track.artist.name)
             .map(|art| art.name.clone());
 
-        let album_match = track.album == result.album.name;
+        let album_match = track.album.title == result.album.name;
 
         let diff = (TimeDelta::from_std(track.duration).unwrap() - result.duration).abs();
 
@@ -225,7 +225,7 @@ impl ResultScore {
 }
 
 pub(crate) async fn search(client: &Client, track: &types::Track) {
-    let query = format!("{} artist:{}", track.title, track.artist);
+    let query = format!("{} artist:{}", track.title, track.artist.name);
 
     let result = client
         .search(
@@ -249,7 +249,7 @@ pub(crate) async fn search(client: &Client, track: &types::Track) {
     dbg!(track);
     println!(
         "Search track: {}, artist: {}, album: {}, # {}",
-        track.title, track.artist, track.album, track.number
+        track.title, track.artist.name, track.album.title, track.number
     );
 
     let mut tm = TrackMatcher::new(track);
