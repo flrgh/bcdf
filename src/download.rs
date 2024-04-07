@@ -57,7 +57,6 @@ pub(crate) async fn download(state: &crate::state::State) {
             tag.set_artist(&track.artist.name);
             tag.set_album_artist(&track.artist.name);
             tag.set_track(track.number as u32);
-            tag.write_to_path(path, Version::Id3v24)?;
 
             fn set_tag(t: &mut Tag, name: &str, value: &Option<String>) {
                 if let Some(value) = value {
@@ -79,6 +78,8 @@ pub(crate) async fn download(state: &crate::state::State) {
             set_tag(&mut tag, "bandcamp_album_id", &track.album.bandcamp_id);
             set_tag(&mut tag, "bandcamp_album_url", &track.album.bandcamp_url);
             set_tag(&mut tag, "spotify_album_id", &track.album.spotify_id);
+
+            tag.write_to_path(path, Version::Id3v24)?;
 
             Ok(())
         });
