@@ -36,8 +36,19 @@ impl State {
     pub(crate) fn try_get_or_create(info: BlogInfo) -> anyhow::Result<Self> {
         let path = Self::filename(&info);
 
-        let mut state: State = match std::fs::File::open(&path) {
-            Ok(fh) => json::from_reader(fh)?,
+        let state: State = match std::fs::File::open(&path) {
+            Ok(fh) => {
+                let mut state = match json::from_reader::<_, State>(fh) {
+                    Ok(mut state) => {
+                        state.blog_info = info;
+                        state
+                    }
+                    Err(_) => State::new(info)
+                };
+                state.fname = path;
+                state.save()?;
+                state
+            },
             Err(_) => {
                 std::fs::create_dir_all(path.parent().unwrap())?;
                 let fh = std::fs::File::create(&path)?;
@@ -46,8 +57,6 @@ impl State {
                 state
             }
         };
-
-        state.fname = path;
 
         Ok(state)
     }
@@ -58,6 +67,17 @@ impl State {
         }
 
         self.fname.parent().unwrap().to_path_buf()
+    }
+
+    pub(crate) fn save(&self) -> anyhow::Result<()> {
+        let mut fh = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(&self.fname)?;
+
+        json::to_writer(&mut fh, &self)?;
+        Ok(())
     }
 }
 
