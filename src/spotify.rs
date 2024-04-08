@@ -123,11 +123,11 @@ impl TrackMatcher {
     }
 }
 
-pub(crate) async fn connect() -> Client {
+pub(crate) async fn connect() -> anyhow::Result<Client> {
     let creds = Credentials::from_env().unwrap();
     let spotify = ClientCredsSpotify::new(creds);
-    spotify.request_token().await.unwrap();
-    spotify
+    spotify.request_token().await?;
+    Ok(spotify)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -274,4 +274,28 @@ pub(crate) async fn search(client: &Client, track: &types::Track) {
     );
 
     dbg!(best_score.score());
+}
+
+pub(crate) async fn create_playlist(client: &Client, state: &mut crate::state::State) -> anyhow::Result<()> {
+    if state.spotify_playlist_id.is_some() {
+        return Ok(());
+    }
+
+    let title = format!("Bandcamp - {} - {}",
+                        state.blog_info.published.format("%Y-%m-%d"),
+                        &state.blog_info.title);
+
+    println!("searching for playlist: {}", &title);
+
+
+    let res = client.search(&title, SearchType::Playlist, Some(MARKET), None, Some(10), None).await?;
+    let SearchResult::Playlists(page) = res else {
+        return Ok(());
+    };
+
+    for item in page.items {
+        dbg!(&item);
+    }
+
+    Ok(())
 }

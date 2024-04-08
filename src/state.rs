@@ -8,6 +8,7 @@ const OUT_DIR: &str = "./data";
 pub(crate) struct State {
     pub(crate) blog_info: BlogInfo,
     pub(crate) tracks: Option<Vec<TrackState>>,
+    pub(crate) spotify_playlist_id: Option<String>,
 
     #[serde(skip)]
     pub(crate) fname: PathBuf,
@@ -19,6 +20,7 @@ impl State {
         Self {
             blog_info: info,
             tracks: None,
+            spotify_playlist_id: None,
             fname,
         }
     }
