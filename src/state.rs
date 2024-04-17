@@ -2,7 +2,7 @@ use crate::{bandcamp::BlogInfo, types::Track};
 use serde_json as json;
 use std::path::PathBuf;
 
-const OUT_DIR: &str = "./data";
+pub(crate) const OUT_DIR: &str = "./data";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct State {

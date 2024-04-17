@@ -8,8 +8,28 @@ mod tag;
 mod types;
 mod util;
 
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Base directory for storing downloaded content
+    #[arg(long, default_value_t = crate::state::OUT_DIR.to_string())]
+    download_to: String,
+
+    /// Don't download anything
+    #[arg(long, default_value_t = false)]
+    no_download: bool,
+
+    /// Don't create Spotify playlists
+    #[arg(long, default_value_t = false)]
+    no_spotify: bool,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
     tracing_subscriber::fmt::init();
 
     let urls = feed::urls().await?;
@@ -19,7 +39,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let spotify = spotify::connect().await?;
+    let spotify = if args.no_spotify {
+        None
+    } else {
+        Some(spotify::connect().await?)
+    };
 
     for url in urls {
         tracing::info!("scanning post: {url}");
@@ -28,13 +52,17 @@ async fn main() -> anyhow::Result<()> {
 
         let mut state = state::State::try_get_or_create(info)?;
 
-        spotify.exec(&mut state).await?;
-        state.save()?;
+        if let Some(spotify) = &spotify {
+            spotify.exec(&mut state).await?;
+            state.save()?;
+        }
 
-        download::download(&state).await;
-        state.save()?;
+        if !args.no_download {
+            download::download(&state).await;
+            state.save()?;
 
-        tag::tag(&state).await?;
+            tag::tag(&state).await?;
+        }
     }
 
     Ok(())

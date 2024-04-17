@@ -10,3 +10,14 @@ The Bandcamp Daily Fetcher (`bcdf`) is a program for following and consuming
 music from the Bandcamp Daily blog. It scans the blog's RSS feed for posts and
 creates Spotify playlists for them. It can also download the songs straight from
 Bandcamp for listening in a local media player.
+
+
+```
+$ bcdf --help
+Options:
+      --download-to <DOWNLOAD_TO>  Base directory for storing downloaded content [default: ./data]
+      --no-download                Don't download anything
+      --no-spotify                 Don't create Spotify playlists
+  -h, --help                       Print help
+  -V, --version                    Print version
+```
