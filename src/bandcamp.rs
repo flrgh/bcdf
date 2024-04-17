@@ -14,8 +14,8 @@ pub(crate) struct TrackInfo {
     pub(crate) track_title: String,
     pub(crate) audio_url: std::collections::BTreeMap<String, String>,
 
-    pub(crate) album_id: u64,
-    pub(crate) track_id: u64,
+    pub(crate) album_id: Option<u64>,
+    pub(crate) track_id: Option<u64>,
 }
 
 impl TrackInfo {
@@ -42,28 +42,27 @@ impl PlayerInfo {
         self.tracklist
             .iter()
             .find(|&ti| ti.track_number == self.featured_track_number)
-            .map(|ti| {
-                Track {
-                    title: ti.track_title.clone(),
-                    artist: crate::types::Artist {
-                        name: self.band_name.clone(),
-                        bandcamp_id: self.band_id.map(|id| id.to_string()),
-                        bandcamp_url: self.band_url.clone(),
-                        spotify_id: None,
-                    },
-                    album: crate::types::Album {
-                        title: self.title.clone(),
-                        bandcamp_id: Some(ti.album_id.to_string()),
-                        bandcamp_url: self.tralbum_url.clone(),
-                        spotify_id: None,
-                    },
-                    duration: ti.audio_track_duration,
-                    number: ti.track_number,
-                    download_url: ti.download_url(),
-                    bandcamp_track_id: Some(ti.track_id.to_string()),
+            .map(|ti| Track {
+                title: ti.track_title.clone(),
+                artist: crate::types::Artist {
+                    name: self.band_name.clone(),
+                    bandcamp_id: self.band_id.map(|id| id.to_string()),
+                    bandcamp_url: self.band_url.clone(),
                     spotify_id: None,
-                    bandcamp_playlist_track_number: playlist_index,
-                }
+                },
+                album: crate::types::Album {
+                    title: self.title.clone(),
+                    bandcamp_id: ti.album_id.map(|id| id.to_string()),
+                    bandcamp_url: self.tralbum_url.clone(),
+                    spotify_id: None,
+                },
+                duration: ti.audio_track_duration,
+                number: ti.track_number,
+                download_url: ti.download_url(),
+                bandcamp_track_id: ti.track_id.map(|id| id.to_string()),
+                spotify_id: None,
+                spotify_playlist_id: None,
+                bandcamp_playlist_track_number: playlist_index,
             })
     }
 }
@@ -131,11 +130,7 @@ impl BlogInfo {
     }
 
     pub(crate) async fn try_from_url(url: &str) -> anyhow::Result<Self> {
-        let bytes = reqwest::get(url)
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
+        let bytes = reqwest::get(url).await?.error_for_status()?.bytes().await?;
 
         let html = String::from_utf8(bytes.to_vec())?;
         Ok(Self::from_html(&html))

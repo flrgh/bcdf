@@ -14,7 +14,7 @@ id3 = { version = "1.13.1", features = ["tokio"] }
 musicbrainz_rs = { version = "0.5.0", default-features = false, features = ["async"] }
 nucleo-matcher = "0.3.1"
 reqwest = { version = "0.12.3", features = ["stream"] }
-rspotify = "0.13.0"
+rspotify = { version = "0.13.0", features = ["cli"] }
 scraper = "0.19.0"
 serde = "1.0.197"
 serde_json = "1.0.114"

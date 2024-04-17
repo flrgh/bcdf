@@ -1,4 +1,4 @@
-use crate::bandcamp::BlogInfo;
+use crate::{bandcamp::BlogInfo, types::Track};
 use serde_json as json;
 use std::path::PathBuf;
 
@@ -7,68 +7,111 @@ const OUT_DIR: &str = "./data";
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct State {
     pub(crate) blog_info: BlogInfo,
-    pub(crate) tracks: Option<Vec<TrackState>>,
+    pub(crate) tracks: Vec<Track>,
     pub(crate) spotify_playlist_id: Option<String>,
+}
 
-    #[serde(skip)]
-    pub(crate) fname: PathBuf,
+fn dirname(info: &BlogInfo) -> PathBuf {
+    PathBuf::from(OUT_DIR).join(format!(
+        "{} - {}",
+        info.published.format("%Y-%m-%d"),
+        info.title
+    ))
+}
+
+fn filename(info: &BlogInfo) -> PathBuf {
+    dirname(info).join("info.json")
+}
+
+pub(crate) fn save<T: serde::Serialize>(t: &T, fname: &PathBuf) -> anyhow::Result<()> {
+    if let Some(dir) = fname.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+
+    let fh = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(fname)?;
+
+    Ok(serde_json::to_writer(fh, t)?)
+}
+
+pub(crate) fn load<T: for<'de> serde::Deserialize<'de>>(fname: &PathBuf) -> anyhow::Result<T> {
+    let fh = std::fs::OpenOptions::new()
+        .read(true)
+        .create(false)
+        .create_new(false)
+        .open(fname)?;
+
+    Ok(serde_json::from_reader::<_, T>(fh)?)
+}
+
+pub(crate) fn rehydrate<T>(t: T, fname: &PathBuf) -> anyhow::Result<T>
+where
+    T: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    if let Ok(t) = load(fname) {
+        return Ok(t);
+    }
+
+    save(&t, fname)?;
+
+    Ok(t)
 }
 
 impl State {
     fn new(info: BlogInfo) -> Self {
-        let fname = Self::filename(&info);
         Self {
             blog_info: info,
-            tracks: None,
+            tracks: vec![],
             spotify_playlist_id: None,
-            fname,
         }
     }
 
-    fn filename(info: &BlogInfo) -> PathBuf {
-        PathBuf::from(OUT_DIR)
-            .join(format!(
-                "{} - {}",
-                info.published.format("%Y-%m-%d"),
-                info.title
-            ))
-            .join("info.json")
-    }
-
-    pub(crate) fn try_get_or_create(info: BlogInfo) -> anyhow::Result<Self> {
-        let path = Self::filename(&info);
-
-        let state: State = match std::fs::File::open(&path) {
-            Ok(fh) => {
-                let mut state = match json::from_reader::<_, State>(fh) {
-                    Ok(mut state) => {
-                        state.blog_info = info;
-                        state
-                    }
-                    Err(_) => State::new(info)
-                };
-                state.fname = path;
-                state.save()?;
-                state
-            },
-            Err(_) => {
-                std::fs::create_dir_all(path.parent().unwrap())?;
-                let fh = std::fs::File::create(&path)?;
-                let state = Self::new(info);
-                json::to_writer(fh, &state)?;
-                state
-            }
-        };
-
-        Ok(state)
+    pub(crate) fn filename(&self) -> PathBuf {
+        filename(&self.blog_info)
     }
 
     pub(crate) fn dirname(&self) -> PathBuf {
-        if self.fname.parent().is_none() {
-            eprintln!("what the fuck: {}", self.fname.to_string_lossy());
+        dirname(&self.blog_info)
+    }
+
+    pub(crate) fn try_from_file(fname: &PathBuf) -> anyhow::Result<Self> {
+        let fh = std::fs::OpenOptions::new()
+            .read(true)
+            .create(false)
+            .create_new(false)
+            .open(fname)?;
+
+        Ok(serde_json::from_reader::<_, Self>(fh)?)
+    }
+
+    pub(crate) fn rehydrate_tracks(&mut self) -> anyhow::Result<()> {
+        let mut tracks = Vec::with_capacity(self.blog_info.tracks.len());
+
+        let dir = self.dirname();
+
+        for track in self.blog_info.tracks.iter() {
+            let fname = dir.join(track.meta_filename());
+            tracks.push(rehydrate(track.to_owned(), &fname)?);
         }
 
-        self.fname.parent().unwrap().to_path_buf()
+        self.tracks = tracks;
+        Ok(())
+    }
+
+    pub(crate) fn try_get_or_create(info: BlogInfo) -> anyhow::Result<Self> {
+        let path = filename(&info);
+
+        let mut state = if let Ok(state) = load::<Self>(&path) {
+            state
+        } else {
+            Self::new(info)
+        };
+
+        state.rehydrate_tracks()?;
+        Ok(state)
     }
 
     pub(crate) fn save(&self) -> anyhow::Result<()> {
@@ -76,12 +119,25 @@ impl State {
             .write(true)
             .truncate(true)
             .create(true)
-            .open(&self.fname)?;
+            .open(self.filename())?;
 
         json::to_writer(&mut fh, &self)?;
+
+        let dir = self.dirname();
+        for track in &self.tracks {
+            save(track, &dir.join(track.meta_filename()))?;
+        }
+
         Ok(())
     }
-}
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct TrackState {}
+    pub(crate) fn has_spotify_tracks(&self) -> bool {
+        self.tracks.iter().any(|t| t.spotify_id.is_some())
+    }
+
+    pub(crate) fn needs_playlist_assignments(&self) -> bool {
+        self.tracks
+            .iter()
+            .any(|t| t.spotify_id.is_some() && t.spotify_playlist_id.is_none())
+    }
+}

@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-use tokio::io::AsyncWriteExt;
 use futures::stream::StreamExt;
-use tokio::task::JoinSet;
-use reqwest::Client;
-use id3::{Tag, TagLike, Frame, Version};
 use id3::frame::Content;
+use id3::{Frame, Tag, TagLike, Version};
+use reqwest::Client;
+use tokio::io::AsyncWriteExt;
+use tokio::task::JoinSet;
 
 pub(crate) async fn download(state: &crate::state::State) {
     let mut set: JoinSet<anyhow::Result<()>> = JoinSet::new();
@@ -16,24 +16,20 @@ pub(crate) async fn download(state: &crate::state::State) {
         let track = track.clone();
 
         let Some(url) = track.download_url.clone() else {
-            println!("SKIP (no URL) {}", track.title);
             continue;
         };
 
         let client = client.clone();
-        let path = state.dirname().join(track.filename());
+        let path = state.dirname().join(track.mp3_filename());
 
         set.spawn(async move {
-            if path.is_file() {
-                println!("SKIP (exists) {}", track.title);
-            } else {
+            if !path.is_file() {
                 println!("downloading {} -> {}", track.title, url);
 
-                let res = client.execute(client.get(url).build()?)
-                    .await?;
+                let res = client.execute(client.get(url).build()?).await?;
 
                 match res.status().as_u16() {
-                    200 => {},
+                    200 => {}
                     status => {
                         anyhow::bail!("non-200 status: {status}");
                     }
@@ -62,14 +58,18 @@ pub(crate) async fn download(state: &crate::state::State) {
                 if let Some(value) = value {
                     t.add_frame(id3::frame::ExtendedText {
                         description: name.to_string(),
-                        value: value.clone()
+                        value: value.clone(),
                     });
                 }
             }
 
             set_tag(&mut tag, "bandcamp_track_id", &track.bandcamp_track_id);
             set_tag(&mut tag, "spotify_track_id", &track.spotify_id);
-            set_tag(&mut tag, "bandcamp_playlist_track_number", &Some(track.bandcamp_playlist_track_number.to_string()));
+            set_tag(
+                &mut tag,
+                "bandcamp_playlist_track_number",
+                &Some(track.bandcamp_playlist_track_number.to_string()),
+            );
 
             set_tag(&mut tag, "bandcamp_artist_id", &track.artist.bandcamp_id);
             set_tag(&mut tag, "bandcamp_artist_url", &track.artist.bandcamp_url);

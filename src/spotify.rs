@@ -1,301 +1,259 @@
 use std::cmp;
 
+use anyhow::Context;
 use chrono::TimeDelta;
-use rspotify::model::{Country, IncludeExternal, Market, SearchResult, SearchType};
-use rspotify::prelude::*;
-use rspotify::{ClientCredsSpotify, Credentials};
-
-use nucleo_matcher::{
-    pattern::{Atom, AtomKind, CaseMatching, Normalization},
-    Config, Matcher, Utf32Str,
+use futures::stream::TryStreamExt;
+use rspotify::model::{
+    Country, IncludeExternal, Market, PlayableId, PlaylistId, SearchResult, SearchType, TrackId,
+    UserId,
 };
+use rspotify::prelude::*;
+use rspotify::{AuthCodeSpotify, Credentials};
 
+use crate::search::{ResultScore, TrackMatcher};
+use crate::state::State;
 use crate::types;
 
-type Client = ClientCredsSpotify;
+pub(crate) struct Client {
+    spotify: AuthCodeSpotify,
+    user: UserId<'static>,
+}
 
 const MARKET: Market = Market::Country(Country::UnitedStates);
 
-fn normalize(s: &str) -> String {
-    s.to_lowercase().split(" ").collect::<Vec<&str>>().join(" ")
-}
-
-#[derive(Debug)]
-struct StringMatcher {
-    matcher: Matcher,
-    atom: Atom,
-    buf: Vec<char>,
-    max: u16,
-}
-
-impl StringMatcher {
-    fn new(s: &str) -> Self {
-        let s = normalize(s);
-        let atom = Atom::new(
-            &s,
-            CaseMatching::Ignore,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
-            true,
-        );
-
-        let mut matcher = Matcher::new(Config::DEFAULT);
-        let mut buf = Vec::new();
-
-        let max = {
-            let haystack = Utf32Str::new(&s, &mut buf);
-            atom.score(haystack, &mut matcher)
-                .expect("wtf this should always match")
-        };
-
-        Self {
-            matcher,
-            atom,
-            buf,
-            max,
-        }
-    }
-
-    fn score(&mut self, s: &str) -> u16 {
-        let haystack = Utf32Str::new(s, &mut self.buf);
-        let score = self.atom.score(haystack, &mut self.matcher);
-
-        score.unwrap_or(0)
-    }
-}
-
-#[derive(Debug)]
-struct TrackMatcher {
-    title: StringMatcher,
-    artist: StringMatcher,
-    album: StringMatcher,
-    number: usize,
-}
-
-impl TrackMatcher {
-    fn new(track: &types::Track) -> Self {
-        Self {
-            title: StringMatcher::new(&track.title),
-            artist: StringMatcher::new(&track.artist.name),
-            album: StringMatcher::new(&track.album.title),
-            number: track.number,
-        }
-    }
-
-    fn score(&mut self, result: &rspotify::model::FullTrack) -> u16 {
-        let artist = result
-            .artists
-            .iter()
-            .map(|art| {
-                let s = self.artist.score(&art.name);
-                println!("artist: {}, score: {}/{}", art.name, s, self.artist.max);
-                s
-            })
-            .max()
-            .unwrap_or(0);
-
-        let title = self.title.score(&result.name);
-        let album = self.album.score(&result.album.name);
-
-        println!(
-            "track: {}, score: {}/{}",
-            result.name, title, self.title.max
-        );
-        println!(
-            "album: {}, score: {}/{}",
-            result.album.name, album, self.album.max
-        );
-
-        let mut tracknum = 0;
-        if (self.album.max - album) < 50 && result.track_number == (self.number as u32) {
-            tracknum = 255;
-        }
-
-        let score = (title * 10) + (artist * 8) + (album * 5) + tracknum;
-
-        println!("composite score: {}/{}", score, self.max_possible());
-
-        score
-    }
-
-    fn max_possible(&self) -> u16 {
-        (self.title.max * 10) + (self.artist.max * 8) + (self.album.max * 5) + (255 * 1)
-    }
-}
-
 pub(crate) async fn connect() -> anyhow::Result<Client> {
-    let creds = Credentials::from_env().unwrap();
-    let spotify = ClientCredsSpotify::new(creds);
-    spotify.request_token().await?;
-    Ok(spotify)
+    let config = rspotify::Config {
+        token_cached: true,
+        token_refreshing: true,
+        ..Default::default()
+    };
+
+    let Some(creds) = Credentials::from_env() else {
+        anyhow::bail!("failed reading credentials from env");
+    };
+
+    let scopes = rspotify::scopes!(
+        "playlist-read-private",
+        "playlist-read-collaborative",
+        "playlist-modify-private",
+        "playlist-modify-public"
+    );
+
+    let Some(oauth) = rspotify::OAuth::from_env(scopes) else {
+        anyhow::bail!("failed setting up OAuth");
+    };
+
+    let spotify = AuthCodeSpotify::with_config(creds, oauth, config);
+    let url = spotify.get_authorize_url(false)?;
+    spotify.prompt_for_token(&url).await?;
+
+    let user = spotify.current_user().await?.id.into_static();
+
+    println!("user id: {}", user);
+
+    spotify.write_token_cache().await?;
+
+    Ok(Client { spotify, user })
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct ResultScore {
-    title_match: bool,
-    artist_match: bool,
-    album_match: bool,
-    number_match: bool,
-    duration_diff: TimeDelta,
-}
+impl Client {
+    pub(crate) async fn get_or_create_playlist(&self, state: &mut State) -> anyhow::Result<()> {
+        if !state.has_spotify_tracks() {
+            println!("no spotify tracks found for playlist");
+            return Ok(());
+        }
 
-impl std::fmt::Display for ResultScore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Title: {}\nArtist: {}\nAlbum: {}\nNumber: {}\nDuration: {}",
-            self.title_match,
-            self.artist_match,
-            self.album_match,
-            self.number_match,
-            self.duration_diff.is_zero()
-        )
+        if state.spotify_playlist_id.is_some() {
+            println!("no action needed: playlist already created");
+            return Ok(());
+        }
+
+        let title = format!(
+            "Bandcamp - {} - {}",
+            state.blog_info.published.format("%Y-%m-%d"),
+            &state.blog_info.title
+        );
+
+        println!("searching for playlist: {}", &title);
+
+        let mut res = self.spotify.current_user_playlists();
+        while let Some(pl) = res.try_next().await.context("fetching user playlists")? {
+            if pl.name == title {
+                println!("found existing playlist: {}", &pl.id);
+                state.spotify_playlist_id = Some(pl.id.to_string());
+                return Ok(());
+            }
+        }
+
+        println!("creating new playlist");
+        let desc = format!("url: {}", state.blog_info.url);
+
+        let pl = self
+            .spotify
+            .user_playlist_create(
+                self.user.clone(),
+                &title,
+                Some(false),
+                Some(false),
+                Some(&desc),
+            )
+            .await
+            .context("creating playlist")?;
+
+        println!("created playlist: {}", &pl.id);
+        state.spotify_playlist_id = Some(pl.id.to_string());
+
+        Ok(())
     }
-}
 
-impl ResultScore {
-    fn new(track: &types::Track, result: &rspotify::model::FullTrack) -> Self {
-        let artist = result
-            .artists
-            .iter()
-            .find(|&art| art.name == track.artist.name)
-            .map(|art| art.name.clone());
+    pub(crate) async fn search(&self, track: &mut types::Track) -> anyhow::Result<()> {
+        if track.spotify_id.is_some() {
+            return Ok(());
+        }
 
-        let album_match = track.album.title == result.album.name;
+        let query = format!("{} artist:{}", track.title, track.artist.name);
 
-        let diff = (TimeDelta::from_std(track.duration).unwrap() - result.duration).abs();
+        let result = self
+            .spotify
+            .search(
+                &query,
+                SearchType::Track,
+                Some(MARKET),
+                Some(IncludeExternal::Audio),
+                Some(10),
+                None,
+            )
+            .await
+            .with_context(|| format!("searching track: {}", track.title))?;
 
-        let rs = Self {
-            title_match: track.title == result.name,
-            artist_match: artist.is_some(),
-            album_match: album_match,
-            number_match: album_match && (track.number as u32 == result.track_number),
-            duration_diff: (TimeDelta::from_std(track.duration).unwrap() - result.duration).abs(),
+        let SearchResult::Tracks(tracks) = result else {
+            anyhow::bail!("expected tracklist search result");
         };
 
         println!(
-            "Result: {}, artist: {}, album: {}, # {}, score: {}",
-            result.name,
-            artist.unwrap_or(String::from("NOMATCH")),
-            result.album.name,
-            result.track_number,
-            rs.score(),
+            "Search track: {}, artist: {}, album: {}, # {}, results: {}",
+            track.title,
+            track.artist.name,
+            track.album.title,
+            track.number,
+            tracks.items.len(),
         );
+
+        if tracks.items.is_empty() {
+            return Ok(());
+        }
+
+        let mut tm = TrackMatcher::new(track);
+
+        let mut best_score = None;
+        let mut best = None;
+
+        for result in tracks.items.iter() {
+            let Some(score) = tm.score(result) else {
+                continue;
+            };
+
+            if match best_score {
+                Some(best_score) => best_score < score,
+                None => true,
+            } {
+                best = Some(result);
+                best_score = Some(score);
+            }
+        }
+
+        let Some(best) = best else {
+            println!("no match for this track");
+            return Ok(());
+        };
 
         println!(
-            "\ttitle match: {}\n\tartist match: {}\n\talbum match: {}\n\ttrackno match: {}\n\tduration diff: {}",
-            rs.title_match, rs.artist_match, rs.album_match, rs.number_match,
-            rs.duration_diff.num_seconds(),
+            "Result track: {}, artist: {}, album: {}, # {}",
+            best.name, best.artists[0].name, best.album.name, best.track_number
         );
 
-        rs
+        let id = best.id.clone().map(|id| id.to_string()).unwrap();
+        println!("setting spotify id to {}", id);
+        track.spotify_id = Some(id);
+
+        Ok(())
     }
 
-    fn score(&self) -> u32 {
-        let mut score = 100;
-
-        const TITLE_WEIGHT: u32 = 100;
-        const ARTIST_WEIGHT: u32 = 50;
-        const ALBUM_WEIGHT: u32 = 50;
-        const NUMBER_WEIGHT: u32 = 20;
-        const DURATION_WEIGHT: u32 = 50;
-
-        if self.title_match {
-            score += TITLE_WEIGHT;
+    pub(crate) async fn exec(&self, state: &mut State) -> anyhow::Result<()> {
+        for track in state.tracks.iter_mut() {
+            self.search(track).await.context("searching track")?;
         }
 
-        if self.artist_match {
-            score += ARTIST_WEIGHT;
-        }
+        self.get_or_create_playlist(state).await?;
+        state.save()?;
 
-        if self.album_match {
-            score += ALBUM_WEIGHT;
-        }
+        self.add_tracks_to_playlist(state).await?;
+        state.save()?;
 
-        if self.number_match && self.album_match {
-            score += NUMBER_WEIGHT;
-        }
-
-        if self.duration_diff.is_zero() {
-            score += DURATION_WEIGHT;
-        }
-
-        score
-    }
-}
-
-pub(crate) async fn search(client: &Client, track: &types::Track) {
-    let query = format!("{} artist:{}", track.title, track.artist.name);
-
-    let result = client
-        .search(
-            &query,
-            SearchType::Track,
-            Some(MARKET),
-            Some(IncludeExternal::Audio),
-            Some(10),
-            None,
-        )
-        .await;
-
-    let Ok(SearchResult::Tracks(tracks)) = result else {
-        return;
-    };
-
-    if tracks.items.is_empty() {
-        return;
+        Ok(())
     }
 
-    dbg!(track);
-    println!(
-        "Search track: {}, artist: {}, album: {}, # {}",
-        track.title, track.artist.name, track.album.title, track.number
-    );
-
-    let mut tm = TrackMatcher::new(track);
-
-    let mut best = &tracks.items[0];
-    let mut best_score = ResultScore::new(track, best);
-
-    for result in tracks.items.iter() {
-        let tscore = tm.score(result);
-        dbg!(tscore);
-
-        let score = ResultScore::new(track, result);
-        if score.score() > best_score.score() {
-            best = result;
-            best_score = score;
+    async fn add_tracks_to_playlist(&self, state: &mut State) -> anyhow::Result<()> {
+        if !state.needs_playlist_assignments() {
+            return Ok(());
         }
+
+        let Some(ref id) = state.spotify_playlist_id else {
+            return Ok(());
+        };
+
+        let plid = PlaylistId::from_id_or_uri(id)?;
+
+        let mut current_ids = std::collections::HashSet::new();
+        let mut res = self
+            .spotify
+            .playlist_items(plid.clone(), None, Some(MARKET));
+
+        while let Some(item) = res.try_next().await.context("fetching playlist track")? {
+            let Some(track) = item.track else {
+                continue;
+            };
+
+            let Some(track_id) = track.id() else {
+                continue;
+            };
+
+            current_ids.insert(track_id.uri());
+        }
+
+        let mut add = vec![];
+        for track in state.tracks.iter_mut() {
+            let Some(ref spid) = track.spotify_id else {
+                continue;
+            };
+
+            if current_ids.contains(spid) {
+                continue;
+            }
+
+            if let Some(ref track_pl_id) = track.spotify_playlist_id {
+                if *track_pl_id == *id {
+                    continue;
+                } else {
+                    anyhow::bail!("that's weird... this track has a playlist id ({}), but it doesn't match the playlist we want to add it to ({})", track_pl_id, id);
+                }
+            }
+
+            add.push(PlayableId::Track(TrackId::from_id_or_uri(spid)?));
+            track.spotify_playlist_id = Some(id.to_owned());
+        }
+
+        if add.is_empty() {
+            return Ok(());
+        }
+
+        let res = self
+            .spotify
+            .playlist_add_items(plid, add, None)
+            .await
+            .context("adding playlist items")?;
+        dbg!(res);
+
+        Ok(())
     }
-
-    println!(
-        "Result track: {}, artist: {}, album: {}, # {}",
-        best.name, best.artists[0].name, best.album.name, best.track_number
-    );
-
-    dbg!(best_score.score());
-}
-
-pub(crate) async fn create_playlist(client: &Client, state: &mut crate::state::State) -> anyhow::Result<()> {
-    if state.spotify_playlist_id.is_some() {
-        return Ok(());
-    }
-
-    let title = format!("Bandcamp - {} - {}",
-                        state.blog_info.published.format("%Y-%m-%d"),
-                        &state.blog_info.title);
-
-    println!("searching for playlist: {}", &title);
-
-
-    let res = client.search(&title, SearchType::Playlist, Some(MARKET), None, Some(10), None).await?;
-    let SearchResult::Playlists(page) = res else {
-        return Ok(());
-    };
-
-    for item in page.items {
-        dbg!(&item);
-    }
-
-    Ok(())
 }
