@@ -14,7 +14,7 @@ use clap::Parser;
 #[command(version, about, long_about = None)]
 struct Args {
     /// Base directory for storing downloaded content
-    #[arg(long, default_value_t = crate::state::OUT_DIR.to_string())]
+    #[arg(long, value_name = "PATH", default_value_t = crate::state::OUT_DIR.to_string())]
     download_to: String,
 
     /// Don't download anything
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
 
         let info = bandcamp::BlogInfo::try_from_url(&url).await?;
 
-        let mut state = state::State::try_get_or_create(info)?;
+        let mut state = state::State::try_get_or_create(info, &args.download_to)?;
 
         if let Some(spotify) = &spotify {
             spotify.exec(&mut state).await?;

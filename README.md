@@ -14,10 +14,12 @@ Bandcamp for listening in a local media player.
 
 ```
 $ bcdf --help
+Usage: bcdf [OPTIONS]
+
 Options:
-      --download-to <DOWNLOAD_TO>  Base directory for storing downloaded content [default: ./data]
-      --no-download                Don't download anything
-      --no-spotify                 Don't create Spotify playlists
-  -h, --help                       Print help
-  -V, --version                    Print version
+      --download-to <PATH>  Base directory for storing downloaded content [default: ./data]
+      --no-download         Don't download anything
+      --no-spotify          Don't create Spotify playlists
+  -h, --help                Print help
+  -V, --version             Print version
 ```

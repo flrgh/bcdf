@@ -9,18 +9,19 @@ pub(crate) struct State {
     pub(crate) blog_info: BlogInfo,
     pub(crate) tracks: Vec<Track>,
     pub(crate) spotify_playlist_id: Option<String>,
+    root_dir: PathBuf,
 }
 
-fn dirname(info: &BlogInfo) -> PathBuf {
-    PathBuf::from(OUT_DIR).join(format!(
+fn dirname(info: &BlogInfo, dir: &PathBuf) -> PathBuf {
+    dir.join(format!(
         "{} - {}",
         info.published.format("%Y-%m-%d"),
         info.title
     ))
 }
 
-fn filename(info: &BlogInfo) -> PathBuf {
-    dirname(info).join("info.json")
+fn filename(info: &BlogInfo, dir: &PathBuf) -> PathBuf {
+    dirname(info, dir).join("info.json")
 }
 
 pub(crate) fn save<T: serde::Serialize>(t: &T, fname: &PathBuf) -> anyhow::Result<()> {
@@ -66,15 +67,16 @@ impl State {
             blog_info: info,
             tracks: vec![],
             spotify_playlist_id: None,
+            root_dir: OUT_DIR.into(),
         }
     }
 
     pub(crate) fn filename(&self) -> PathBuf {
-        filename(&self.blog_info)
+        filename(&self.blog_info, &self.root_dir)
     }
 
     pub(crate) fn dirname(&self) -> PathBuf {
-        dirname(&self.blog_info)
+        dirname(&self.blog_info, &self.root_dir)
     }
 
     pub(crate) fn try_from_file(fname: &PathBuf) -> anyhow::Result<Self> {
@@ -101,14 +103,17 @@ impl State {
         Ok(())
     }
 
-    pub(crate) fn try_get_or_create(info: BlogInfo) -> anyhow::Result<Self> {
-        let path = filename(&info);
+    pub(crate) fn try_get_or_create(info: BlogInfo, dir: &str) -> anyhow::Result<Self> {
+        let dir = PathBuf::from(dir);
+        let path = filename(&info, &dir);
 
         let mut state = if let Ok(state) = load::<Self>(&path) {
             state
         } else {
             Self::new(info)
         };
+
+        state.root_dir = dir;
 
         state.rehydrate_tracks()?;
         Ok(state)
