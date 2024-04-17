@@ -21,8 +21,6 @@ async fn main() -> anyhow::Result<()> {
     for url in urls {
         let info = bandcamp::BlogInfo::try_from_url(&url).await?;
 
-        println!("{}", info.url);
-
         let mut state = state::State::try_get_or_create(info)?;
 
         spotify.exec(&mut state).await?;
