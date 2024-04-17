@@ -15,12 +15,15 @@ async fn main() -> anyhow::Result<()> {
     let urls = feed::urls().await?;
 
     if urls.is_empty() {
+        tracing::info!("no posts to scrape, exiting");
         return Ok(());
     }
 
     let spotify = spotify::connect().await?;
 
     for url in urls {
+        tracing::info!("scanning post: {url}");
+
         let info = bandcamp::BlogInfo::try_from_url(&url).await?;
 
         let mut state = state::State::try_get_or_create(info)?;
