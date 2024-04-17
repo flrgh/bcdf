@@ -15,6 +15,7 @@ musicbrainz_rs = { version = "0.5.0", default-features = false, features = ["asy
 nucleo-matcher = "0.3.1"
 reqwest = { version = "0.12.3", features = ["stream"] }
 rspotify = { version = "0.13.0", features = ["cli"] }
+rss = { version = "2.0.7", features = ["url", "serde", "atom", "chrono", "with-serde"] }
 scraper = "0.19.0"
 serde = "1.0.197"
 serde_json = "1.0.114"

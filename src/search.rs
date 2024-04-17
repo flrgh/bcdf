@@ -96,9 +96,10 @@ impl StringMatcher {
 
         let max = {
             let haystack = Utf32Str::new(&normalized, &mut buf);
-            let max = atom
-                .score(haystack, &mut matcher)
-                .expect("wtf this should always match");
+            let max = atom.score(haystack, &mut matcher).unwrap_or_else(|| {
+                eprintln!("wtf, search for '{}' is bugged", s);
+                u16::MAX
+            });
             assert!(max > 0);
 
             max
