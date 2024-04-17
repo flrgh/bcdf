@@ -10,7 +10,9 @@ mod util;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let urls = feed::watch().await?;
+    tracing_subscriber::fmt::init();
+
+    let urls = feed::urls().await?;
 
     if urls.is_empty() {
         return Ok(());

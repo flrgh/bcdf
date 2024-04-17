@@ -4,12 +4,14 @@ use anyhow::Context;
 use id3::frame::Content;
 use id3::{Frame, Tag, TagLike, Version};
 
+#[tracing::instrument]
 pub(crate) async fn tag(state: &crate::state::State) -> anyhow::Result<()> {
     //let mut set: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
     for track in &state.tracks {
         let fname = state.dirname().join(track.mp3_filename());
         if !fname.exists() {
+            tracing::debug!(?track, filename = ?fname, "SKIP: file does not exist");
             continue;
         }
 
@@ -19,7 +21,7 @@ pub(crate) async fn tag(state: &crate::state::State) -> anyhow::Result<()> {
 
         let mut updated = false;
 
-        println!("tagging {}", track.title);
+        tracing::debug!(?track, "tagging");
 
         if tag.title().unwrap_or("") != track.title {
             updated = true;
@@ -85,10 +87,10 @@ pub(crate) async fn tag(state: &crate::state::State) -> anyhow::Result<()> {
         set_tag(&mut tag, "spotify_album_id", &track.album.spotify_id);
 
         if updated {
-            println!("tags for {} updated", fname.to_string_lossy());
+            tracing::info!(?fname, "tags updated, saving file");
             tag.write_to_path(fname, Version::Id3v24)?;
         } else {
-            println!("no tag changes");
+            tracing::debug!(?fname, "no tags were changed");
         }
     }
 

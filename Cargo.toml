@@ -20,3 +20,5 @@ scraper = "0.19.0"
 serde = "1.0.197"
 serde_json = "1.0.114"
 tokio = { version = "1.36.0", features = ["rt", "macros", "rt-multi-thread"] }
+tracing = { version = "0.1.40", features = ["log", "async-await"] }
+tracing-subscriber = "0.3.18"

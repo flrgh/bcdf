@@ -14,6 +14,7 @@ use crate::search::{ResultScore, TrackMatcher};
 use crate::state::State;
 use crate::types;
 
+#[derive(Debug)]
 pub(crate) struct Client {
     spotify: AuthCodeSpotify,
     user: UserId<'static>,
@@ -44,12 +45,15 @@ pub(crate) async fn connect() -> anyhow::Result<Client> {
     };
 
     let spotify = AuthCodeSpotify::with_config(creds, oauth, config);
-    let url = spotify.get_authorize_url(false)?;
-    spotify.prompt_for_token(&url).await?;
+    let url = spotify
+        .get_authorize_url(false)
+        .context("getting Spotify auth url")?;
+    spotify
+        .prompt_for_token(&url)
+        .await
+        .context("prompting for Spotify token")?;
 
     let user = spotify.current_user().await?.id.into_static();
-
-    println!("user id: {}", user);
 
     spotify.write_token_cache().await?;
 
@@ -57,14 +61,21 @@ pub(crate) async fn connect() -> anyhow::Result<Client> {
 }
 
 impl Client {
+    #[tracing::instrument]
     pub(crate) async fn get_or_create_playlist(&self, state: &mut State) -> anyhow::Result<()> {
         if !state.has_spotify_tracks() {
-            println!("no spotify tracks found for playlist");
+            tracing::debug!(
+                title = state.blog_info.title,
+                "no spotify tracks found for playlist"
+            );
             return Ok(());
         }
 
         if state.spotify_playlist_id.is_some() {
-            println!("no action needed: playlist already created");
+            tracing::debug!(
+                title = state.blog_info.title,
+                "no action needed: playlist already created"
+            );
             return Ok(());
         }
 
@@ -74,18 +85,18 @@ impl Client {
             &state.blog_info.title
         );
 
-        println!("searching for playlist: {}", &title);
+        tracing::debug!(name = &title, "searching for playlist");
 
         let mut res = self.spotify.current_user_playlists();
         while let Some(pl) = res.try_next().await.context("fetching user playlists")? {
             if pl.name == title {
-                println!("found existing playlist: {}", &pl.id);
+                tracing::debug!(id = ?&pl.id, "found existing playlist");
                 state.spotify_playlist_id = Some(pl.id.to_string());
                 return Ok(());
             }
         }
 
-        println!("creating new playlist");
+        tracing::debug!("creating new playlist");
         let desc = format!("url: {}", state.blog_info.url);
 
         let pl = self
@@ -100,7 +111,6 @@ impl Client {
             .await
             .context("creating playlist")?;
 
-        println!("created playlist: {}", &pl.id);
         state.spotify_playlist_id = Some(pl.id.to_string());
 
         Ok(())
@@ -130,13 +140,12 @@ impl Client {
             anyhow::bail!("expected tracklist search result");
         };
 
-        println!(
-            "Search track: {}, artist: {}, album: {}, # {}, results: {}",
-            track.title,
-            track.artist.name,
-            track.album.title,
-            track.number,
-            tracks.items.len(),
+        tracing::debug!(
+            track = track.title,
+            artist = track.artist.name,
+            album = track.album.title,
+            results = tracks.items.len(),
+            "search results",
         );
 
         if tracks.items.is_empty() {
@@ -163,17 +172,20 @@ impl Client {
         }
 
         let Some(best) = best else {
-            println!("no match for this track");
+            tracing::debug!("no match for this track");
             return Ok(());
         };
 
-        println!(
+        tracing::debug!(
             "Result track: {}, artist: {}, album: {}, # {}",
-            best.name, best.artists[0].name, best.album.name, best.track_number
+            best.name,
+            best.artists[0].name,
+            best.album.name,
+            best.track_number
         );
 
         let id = best.id.clone().map(|id| id.to_string()).unwrap();
-        println!("setting spotify id to {}", id);
+        tracing::info!("setting spotify id to {}", id);
         track.spotify_id = Some(id);
 
         Ok(())

@@ -97,7 +97,7 @@ impl StringMatcher {
         let max = {
             let haystack = Utf32Str::new(&normalized, &mut buf);
             let max = atom.score(haystack, &mut matcher).unwrap_or_else(|| {
-                eprintln!("wtf, search for '{}' is bugged", s);
+                tracing::warn!("wtf, search for '{}' is bugged", s);
                 u16::MAX
             });
             assert!(max > 0);
@@ -117,7 +117,7 @@ impl StringMatcher {
 
     fn score(&mut self, s: &str) -> MatchResult {
         if self.original == s {
-            println!("exact match for '{}'", s);
+            tracing::info!("exact match for '{}'", s);
             return MatchResult::new(self.max, self.max);
         }
 
@@ -126,7 +126,7 @@ impl StringMatcher {
 
         let mr = MatchResult::new(score, self.max);
 
-        println!(
+        tracing::info!(
             "search '{}' in '{}': {}/{} ({})",
             s,
             self.original,
@@ -187,14 +187,14 @@ impl TrackMatcher {
         let album = self.album_score(result);
         let artist = self.artist_score(result);
 
-        println!(
+        tracing::info!(
             "track: {}, score: {}/{} ({})",
             result.name,
             title.score,
             self.title.max,
             title.percent(),
         );
-        println!(
+        tracing::info!(
             "album: {}, score: {}/{} ({})",
             result.album.name,
             album.score,
@@ -209,7 +209,7 @@ impl TrackMatcher {
 
         let score = title.weighted() + artist.weighted() + album.weighted() + tracknum.weighted();
 
-        println!("composite score: {}/{}", score, self.max_possible());
+        tracing::info!("composite score: {}/{}", score, self.max_possible());
 
         Some(score)
     }
@@ -265,7 +265,7 @@ impl ResultScore {
             duration_diff: (TimeDelta::from_std(track.duration).unwrap() - result.duration).abs(),
         };
 
-        println!(
+        tracing::info!(
             "Result: {}, artist: {}, album: {}, # {}, score: {}",
             result.name,
             artist.unwrap_or(String::from("NOMATCH")),
@@ -274,7 +274,7 @@ impl ResultScore {
             rs.score(),
         );
 
-        println!(
+        tracing::info!(
             "\ttitle match: {}\n\tartist match: {}\n\talbum match: {}\n\ttrackno match: {}\n\tduration diff: {}",
             rs.title_match, rs.artist_match, rs.album_match, rs.number_match,
             rs.duration_diff.num_seconds(),
