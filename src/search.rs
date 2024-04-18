@@ -17,7 +17,7 @@ const MATCH_SCORE: f32 = 90.0;
 fn normalize(s: &str) -> String {
     s.to_lowercase()
         .replace(['“', '”'], "\"")
-        .split(" ")
+        .split(' ')
         .collect::<Vec<&str>>()
         .join(" ")
 }

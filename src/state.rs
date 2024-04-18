@@ -1,6 +1,6 @@
 use crate::{bandcamp::BlogInfo, types::Track};
 use serde_json as json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) const OUT_DIR: &str = "./data";
 
@@ -12,7 +12,7 @@ pub(crate) struct State {
     root_dir: PathBuf,
 }
 
-fn dirname(info: &BlogInfo, dir: &PathBuf) -> PathBuf {
+fn dirname(info: &BlogInfo, dir: &Path) -> PathBuf {
     dir.join(format!(
         "{} - {}",
         info.published.format("%Y-%m-%d"),
@@ -20,7 +20,7 @@ fn dirname(info: &BlogInfo, dir: &PathBuf) -> PathBuf {
     ))
 }
 
-fn filename(info: &BlogInfo, dir: &PathBuf) -> PathBuf {
+fn filename(info: &BlogInfo, dir: &Path) -> PathBuf {
     dirname(info, dir).join("info.json")
 }
 
