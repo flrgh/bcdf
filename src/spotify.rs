@@ -1,7 +1,4 @@
-use std::cmp;
-
 use anyhow::Context;
-use chrono::TimeDelta;
 use futures::stream::TryStreamExt;
 use rspotify::model::{
     Country, IncludeExternal, Market, PlayableId, PlaylistId, SearchResult, SearchType, TrackId,
@@ -10,7 +7,7 @@ use rspotify::model::{
 use rspotify::prelude::*;
 use rspotify::{AuthCodeSpotify, Credentials};
 
-use crate::search::{ResultScore, TrackMatcher};
+use crate::search::TrackMatcher;
 use crate::state::State;
 use crate::types;
 

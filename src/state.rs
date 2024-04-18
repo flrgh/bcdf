@@ -79,16 +79,6 @@ impl State {
         dirname(&self.blog_info, &self.root_dir)
     }
 
-    pub(crate) fn try_from_file(fname: &PathBuf) -> anyhow::Result<Self> {
-        let fh = std::fs::OpenOptions::new()
-            .read(true)
-            .create(false)
-            .create_new(false)
-            .open(fname)?;
-
-        Ok(serde_json::from_reader::<_, Self>(fh)?)
-    }
-
     pub(crate) fn rehydrate_tracks(&mut self) -> anyhow::Result<()> {
         let mut tracks = Vec::with_capacity(self.blog_info.tracks.len());
 

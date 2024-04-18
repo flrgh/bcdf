@@ -1,13 +1,9 @@
-use std::collections::HashMap;
-
 use anyhow::Context;
-use id3::frame::Content;
-use id3::{Frame, Tag, TagLike, Version};
+use id3::{frame::ExtendedText, Tag, TagLike, Version};
+use std::collections::HashMap;
 
 #[tracing::instrument]
 pub(crate) async fn tag(state: &crate::state::State) -> anyhow::Result<()> {
-    //let mut set: JoinSet<anyhow::Result<()>> = JoinSet::new();
-
     for track in &state.tracks {
         let fname = state.dirname().join(track.mp3_filename());
         if !fname.exists() {
@@ -64,7 +60,7 @@ pub(crate) async fn tag(state: &crate::state::State) -> anyhow::Result<()> {
 
             updated = true;
 
-            t.add_frame(id3::frame::ExtendedText {
+            t.add_frame(ExtendedText {
                 description: name.to_string(),
                 value: value.clone(),
             });

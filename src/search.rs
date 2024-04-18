@@ -23,19 +23,16 @@ fn normalize(s: &str) -> String {
 }
 
 #[derive(Eq, PartialEq, PartialOrd)]
-struct MatchResult {
+struct MatchResult<const W: u16 = 1> {
     score: u16,
     max: u16,
-    weight: u16,
 }
 
-impl MatchResult {
+impl<const W: u16> MatchResult<W> {
+    const WEIGHT: u16 = W;
+
     fn new(score: u16, max: u16) -> Self {
-        Self {
-            score,
-            max,
-            weight: 1,
-        }
+        Self { score, max }
     }
 
     fn unmatched(max: u16) -> Self {
@@ -52,13 +49,8 @@ impl MatchResult {
         (self.score as f32 / self.max as f32) * 100f32
     }
 
-    fn with_weight(mut self, weight: u16) -> Self {
-        self.weight = weight;
-        self
-    }
-
     fn weighted(&self) -> u32 {
-        self.score as u32 * self.weight as u32
+        (self.percent().round() as u32) * (Self::WEIGHT as u32)
     }
 }
 
@@ -70,16 +62,15 @@ impl Ord for MatchResult {
 }
 
 #[derive(Debug)]
-struct StringMatcher {
+struct StringMatcher<const W: u16 = 1> {
     matcher: Matcher,
     atom: Atom,
     buf: Vec<char>,
     max: u16,
     original: String,
-    normalized: String,
 }
 
-impl StringMatcher {
+impl<const W: u16> StringMatcher<W> {
     fn new(s: &str) -> Self {
         let original = s.to_string();
         let normalized = normalize(s);
@@ -110,12 +101,11 @@ impl StringMatcher {
             atom,
             buf,
             max,
-            normalized,
             original,
         }
     }
 
-    fn score(&mut self, s: &str) -> MatchResult {
+    fn score(&mut self, s: &str) -> MatchResult<W> {
         if self.original == s {
             tracing::info!("exact match for '{}'", s);
             return MatchResult::new(self.max, self.max);
@@ -145,6 +135,7 @@ pub(crate) struct TrackMatcher {
     artist: StringMatcher,
     album: StringMatcher,
     number: usize,
+    duration: TimeDelta,
 }
 
 impl TrackMatcher {
@@ -154,17 +145,16 @@ impl TrackMatcher {
             artist: StringMatcher::new(&track.artist.name),
             album: StringMatcher::new(&track.album.title),
             number: track.number,
+            duration: TimeDelta::from_std(track.duration).unwrap(),
         }
     }
 
     fn title_score(&mut self, result: &rspotify::model::FullTrack) -> MatchResult {
-        self.title.score(&result.name).with_weight(TITLE_WEIGHT)
+        self.title.score(&result.name)
     }
 
     fn album_score(&mut self, result: &rspotify::model::FullTrack) -> MatchResult {
-        self.album
-            .score(&result.album.name)
-            .with_weight(ALBUM_WEIGHT)
+        self.album.score(&result.album.name)
     }
 
     fn artist_score(&mut self, result: &rspotify::model::FullTrack) -> MatchResult {
@@ -174,7 +164,6 @@ impl TrackMatcher {
             .map(|art| self.artist.score(&art.name))
             .max()
             .unwrap_or_else(|| MatchResult::unmatched(self.artist.max))
-            .with_weight(ARTIST_WEIGHT)
     }
 
     pub(crate) fn score(&mut self, result: &rspotify::model::FullTrack) -> Option<u32> {
@@ -202,12 +191,24 @@ impl TrackMatcher {
             album.percent(),
         );
 
-        let mut tracknum = MatchResult::new(0, 100).with_weight(TRACKNUM_WEIGHT);
+        let mut tracknum: MatchResult<TRACKNUM_WEIGHT> = MatchResult::new(0, 100);
         if album.percent() > MATCH_SCORE && result.track_number == (self.number as u32) {
             tracknum.score = 100;
         }
 
-        let score = title.weighted() + artist.weighted() + album.weighted() + tracknum.weighted();
+        let mut duration: MatchResult<DURATION_WEIGHT> = MatchResult::new(0, 100);
+        {
+            let diff = (result.duration - self.duration).abs();
+            let percent = (self.duration - diff).num_seconds() / self.duration.num_seconds();
+            assert!((0..=100).contains(&percent));
+            duration.score = percent as u16;
+        }
+
+        let score = title.weighted()
+            + artist.weighted()
+            + album.weighted()
+            + tracknum.weighted()
+            + duration.weighted();
 
         tracing::info!("composite score: {}/{}", score, self.max_possible());
 
@@ -219,99 +220,5 @@ impl TrackMatcher {
             + (self.artist.max as u32 * ARTIST_WEIGHT as u32)
             + (self.album.max as u32 * ALBUM_WEIGHT as u32)
             + TRACKNUM_WEIGHT as u32
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct ResultScore {
-    title_match: bool,
-    artist_match: bool,
-    album_match: bool,
-    number_match: bool,
-    duration_diff: TimeDelta,
-}
-
-impl std::fmt::Display for ResultScore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Title: {}\nArtist: {}\nAlbum: {}\nNumber: {}\nDuration: {}",
-            self.title_match,
-            self.artist_match,
-            self.album_match,
-            self.number_match,
-            self.duration_diff.is_zero()
-        )
-    }
-}
-
-impl ResultScore {
-    pub(crate) fn new(track: &types::Track, result: &rspotify::model::FullTrack) -> Self {
-        let artist = result
-            .artists
-            .iter()
-            .find(|&art| art.name == track.artist.name)
-            .map(|art| art.name.clone());
-
-        let album_match = track.album.title == result.album.name;
-
-        let diff = (TimeDelta::from_std(track.duration).unwrap() - result.duration).abs();
-
-        let rs = Self {
-            title_match: track.title == result.name,
-            artist_match: artist.is_some(),
-            album_match: album_match,
-            number_match: album_match && (track.number as u32 == result.track_number),
-            duration_diff: (TimeDelta::from_std(track.duration).unwrap() - result.duration).abs(),
-        };
-
-        tracing::info!(
-            "Result: {}, artist: {}, album: {}, # {}, score: {}",
-            result.name,
-            artist.unwrap_or(String::from("NOMATCH")),
-            result.album.name,
-            result.track_number,
-            rs.score(),
-        );
-
-        tracing::info!(
-            "\ttitle match: {}\n\tartist match: {}\n\talbum match: {}\n\ttrackno match: {}\n\tduration diff: {}",
-            rs.title_match, rs.artist_match, rs.album_match, rs.number_match,
-            rs.duration_diff.num_seconds(),
-        );
-
-        rs
-    }
-
-    pub(crate) fn score(&self) -> u32 {
-        let mut score = 100;
-
-        const TITLE_WEIGHT: u32 = 100;
-        const ARTIST_WEIGHT: u32 = 50;
-        const ALBUM_WEIGHT: u32 = 50;
-        const NUMBER_WEIGHT: u32 = 20;
-        const DURATION_WEIGHT: u32 = 50;
-
-        if self.title_match {
-            score += TITLE_WEIGHT;
-        }
-
-        if self.artist_match {
-            score += ARTIST_WEIGHT;
-        }
-
-        if self.album_match {
-            score += ALBUM_WEIGHT;
-        }
-
-        if self.number_match && self.album_match {
-            score += NUMBER_WEIGHT;
-        }
-
-        if self.duration_diff.is_zero() {
-            score += DURATION_WEIGHT;
-        }
-
-        score
     }
 }

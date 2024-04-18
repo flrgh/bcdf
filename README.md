@@ -23,3 +23,9 @@ Options:
   -h, --help                Print help
   -V, --version             Print version
 ```
+
+## status
+
+I wrote `bcdf` for my own personal use. It works, but there are warts. I don't
+anticipate putting much effort into UX improvements/documentation to make it
+suitable for a wider audience, so manage your expectations accordingly.
