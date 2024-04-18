@@ -1,4 +1,3 @@
-use anyhow::Context;
 use id3::{frame::ExtendedText, Tag, TagLike, Version};
 use std::collections::HashMap;
 
