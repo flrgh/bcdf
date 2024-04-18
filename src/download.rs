@@ -3,7 +3,6 @@ use reqwest::Client;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 
-#[tracing::instrument]
 pub(crate) async fn download(state: &crate::state::State) {
     let mut set: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
@@ -13,7 +12,7 @@ pub(crate) async fn download(state: &crate::state::State) {
         let track = track.clone();
 
         let Some(url) = track.download_url.clone() else {
-            tracing::debug!(?track, "SKIP: no download url");
+            tracing::debug!(track.title, "SKIP: no download url");
             continue;
         };
 
@@ -21,12 +20,12 @@ pub(crate) async fn download(state: &crate::state::State) {
         let path = state.dirname().join(track.mp3_filename());
 
         if path.is_file() {
-            tracing::debug!(?track, "SKIP: exists");
+            tracing::debug!(track.title, "SKIP: exists");
             continue;
         }
 
         set.spawn(async move {
-            tracing::info!(?track, "downloading");
+            tracing::info!(track.title, "downloading");
 
             let res = client.execute(client.get(url).build()?).await?;
 
@@ -34,7 +33,7 @@ pub(crate) async fn download(state: &crate::state::State) {
                 200 => {}
                 status => {
                     let body = res.text().await.ok();
-                    tracing::error!(?track, status, body, "download failed");
+                    tracing::error!(track.title, status, body, "download failed");
 
                     anyhow::bail!("non-200 status: {status}");
                 }
@@ -47,7 +46,7 @@ pub(crate) async fn download(state: &crate::state::State) {
                 fh.write_all(bytes.as_ref()).await?;
             }
 
-            tracing::debug!(?track, "finished downloading");
+            tracing::debug!(track.title, "finished downloading");
             Ok(())
         });
     }
