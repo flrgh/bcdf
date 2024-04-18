@@ -11,9 +11,7 @@ pub(crate) async fn tag(state: &crate::state::State) -> anyhow::Result<()> {
             continue;
         }
 
-        let mut tag = Tag::async_read_from_path(&fname)
-            .await
-            .with_context(|| format!("reading tags for '{}'", fname.to_string_lossy()))?;
+        let mut tag = Tag::async_read_from_path(&fname).await.unwrap_or_default();
 
         let mut updated = false;
 
