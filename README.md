@@ -1,15 +1,15 @@
 # Bandcamp Daily Fetcher
 
 The [Bandcamp Daily blog](https://daily.bandcamp.com/) is a fantastic resource
-for discovering new music. I follow it in my RSS reader, but I can never keep on
-top of reading (and listening) to new posts.
+for discovering new music. I follow it in my RSS reader, but I can never keep up
+with reading (and listening to) new posts as they come out.
 
-So I wrote this tool to help me out.
+I wrote this tool to help myself out.
 
-The Bandcamp Daily Fetcher (`bcdf`) is a program for following and consuming
-music from the Bandcamp Daily blog. It scans the blog's RSS feed for posts and
-creates Spotify playlists for them. It can also download the songs straight from
-Bandcamp for listening in a local media player.
+**B**and**c**amp **D**aily **F**etcher (`bcdf`) is a program for following and 
+consuming music from the Bandcamp Daily blog. It scans the blog's RSS feed for 
+posts and creates Spotify playlists for them. It can also download the songs 
+straight from Bandcamp for listening in a local media player.
 
 
 ```
