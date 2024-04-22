@@ -39,6 +39,12 @@ pub(crate) fn save<T: serde::Serialize>(t: &T, fname: &PathBuf) -> anyhow::Resul
 }
 
 pub(crate) fn load<T: for<'de> serde::Deserialize<'de>>(fname: &PathBuf) -> anyhow::Result<T> {
+    if let Some(dir) = fname.parent() {
+        if !dir.exists() {
+            std::fs::create_dir_all(dir)?;
+        }
+    }
+
     let fh = std::fs::OpenOptions::new()
         .read(true)
         .create(false)
