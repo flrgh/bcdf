@@ -17,7 +17,11 @@ const MATCH_SCORE: f32 = 90.0;
 fn normalize(s: &str) -> String {
     s.to_lowercase()
         .replace(['“', '”'], "\"")
+        .replace('’', "'")
         .split(' ')
+        .filter(|s| {
+            !s.trim().is_empty()
+        })
         .collect::<Vec<&str>>()
         .join(" ")
 }
@@ -68,12 +72,15 @@ struct StringMatcher<const W: u16 = 1> {
     buf: Vec<char>,
     max: u16,
     original: String,
+    normalized: String,
 }
 
 impl<const W: u16> StringMatcher<W> {
     fn new(s: &str) -> Self {
         let original = s.to_string();
         let normalized = normalize(s);
+        // FIXME: Evidently, I am not using this correctly, because it rarely
+        // ever works, even for strings that are trivially different :(
         let atom = Atom::new(
             &normalized,
             CaseMatching::Ignore,
@@ -102,6 +109,7 @@ impl<const W: u16> StringMatcher<W> {
             buf,
             max,
             original,
+            normalized,
         }
     }
 
@@ -111,15 +119,17 @@ impl<const W: u16> StringMatcher<W> {
             return MatchResult::new(self.max, self.max);
         }
 
-        let haystack = Utf32Str::new(s, &mut self.buf);
+        let s = normalize(s);
+        let haystack = Utf32Str::new(&s, &mut self.buf);
         let score = self.atom.score(haystack, &mut self.matcher).unwrap_or(0);
 
         let mr = MatchResult::new(score, self.max);
 
         tracing::info!(
-            "search '{}' in '{}': {}/{} ({})",
+            "search '{}' in '{}' (normalized: '{}'): {}/{} ({})",
             s,
             self.original,
+            self.normalized,
             mr.score,
             self.max,
             mr.percent(),
@@ -216,9 +226,7 @@ impl TrackMatcher {
     }
 
     fn max_possible(&self) -> u32 {
-        (self.title.max as u32 * TITLE_WEIGHT as u32)
-            + (self.artist.max as u32 * ARTIST_WEIGHT as u32)
-            + (self.album.max as u32 * ALBUM_WEIGHT as u32)
-            + TRACKNUM_WEIGHT as u32
+        (TITLE_WEIGHT as u32 + ARTIST_WEIGHT as u32 + ALBUM_WEIGHT as u32 + TRACKNUM_WEIGHT as u32)
+            * 100
     }
 }
