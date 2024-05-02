@@ -18,9 +18,11 @@ fn normalize(s: &str) -> String {
     s.to_lowercase()
         .replace(['“', '”'], "\"")
         .replace('’', "'")
+        .replace(['(', ')'], "")
         .split(' ')
         .filter(|s| {
-            !s.trim().is_empty()
+            let s = s.trim();
+            !s.is_empty() && s != "-"
         })
         .collect::<Vec<&str>>()
         .join(" ")
