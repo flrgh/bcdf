@@ -24,6 +24,10 @@ struct Args {
     /// Don't create Spotify playlists
     #[arg(long, default_value_t = false)]
     no_spotify: bool,
+
+    /// Scan only a single url
+    #[arg(long)]
+    url: Option<String>,
 }
 
 #[tokio::main]
@@ -32,7 +36,10 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt::init();
 
-    let urls = feed::urls().await?;
+    let urls = match args.url {
+        Some(url) => Vec::from([url]),
+        None => feed::urls().await?,
+    };
 
     if urls.is_empty() {
         tracing::info!("no posts to scrape, exiting");
