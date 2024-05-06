@@ -1,4 +1,5 @@
 mod bandcamp;
+mod cli;
 mod download;
 mod feed;
 mod search;
@@ -8,31 +9,9 @@ mod tag;
 mod types;
 mod util;
 
-use clap::Parser;
-
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
-struct Args {
-    /// Base directory for storing downloaded content
-    #[arg(long, value_name = "PATH", default_value_t = crate::state::OUT_DIR.to_string())]
-    download_to: String,
-
-    /// Don't download anything
-    #[arg(long, default_value_t = false)]
-    no_download: bool,
-
-    /// Don't create Spotify playlists
-    #[arg(long, default_value_t = false)]
-    no_spotify: bool,
-
-    /// Scan only a single url
-    #[arg(long)]
-    url: Option<String>,
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let args = cli::args();
 
     tracing_subscriber::fmt::init();
 

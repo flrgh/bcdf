@@ -1,7 +1,6 @@
 use id3::{frame::ExtendedText, Tag, TagLike, Version};
 use std::collections::HashMap;
 
-#[tracing::instrument]
 pub(crate) async fn tag(state: &crate::state::State) -> anyhow::Result<()> {
     for track in &state.tracks {
         let fname = state.dirname().join(track.mp3_filename());
@@ -13,8 +12,6 @@ pub(crate) async fn tag(state: &crate::state::State) -> anyhow::Result<()> {
         let mut tag = Tag::async_read_from_path(&fname).await.unwrap_or_default();
 
         let mut updated = false;
-
-        tracing::debug!(?track, "tagging");
 
         if tag.title().unwrap_or("") != track.title {
             updated = true;
@@ -31,9 +28,9 @@ pub(crate) async fn tag(state: &crate::state::State) -> anyhow::Result<()> {
             tag.set_album(&track.album.title);
         }
 
-        if updated || tag.album_artist().unwrap_or("") != track.artist.name {
+        if updated || tag.album_artist().unwrap_or("") != track.album_artist.name {
             updated = true;
-            tag.set_album_artist(&track.artist.name);
+            tag.set_album_artist(&track.album_artist.name);
         }
 
         if updated || tag.track().unwrap_or(0) != track.number as u32 {
@@ -74,6 +71,22 @@ pub(crate) async fn tag(state: &crate::state::State) -> anyhow::Result<()> {
         set_tag(&mut tag, "bandcamp_artist_id", &track.artist.bandcamp_id);
         set_tag(&mut tag, "bandcamp_artist_url", &track.artist.bandcamp_url);
         set_tag(&mut tag, "spotify_artist_id", &track.artist.spotify_id);
+
+        set_tag(
+            &mut tag,
+            "bandcamp_album_artist_id",
+            &track.album_artist.bandcamp_id,
+        );
+        set_tag(
+            &mut tag,
+            "bandcamp_album_artist_url",
+            &track.album_artist.bandcamp_url,
+        );
+        set_tag(
+            &mut tag,
+            "spotify_album_artist_id",
+            &track.album_artist.spotify_id,
+        );
 
         set_tag(&mut tag, "bandcamp_album_id", &track.album.bandcamp_id);
         set_tag(&mut tag, "bandcamp_album_url", &track.album.bandcamp_url);

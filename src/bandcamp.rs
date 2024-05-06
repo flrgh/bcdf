@@ -45,6 +45,20 @@ impl PlayerInfo {
             .map(|ti| Track {
                 title: ti.track_title.clone(),
                 artist: crate::types::Artist {
+                    name: ti.artist.clone(),
+                    bandcamp_id: if ti.artist == self.band_name {
+                        self.band_id.map(|id| id.to_string())
+                    } else {
+                        None
+                    },
+                    bandcamp_url: if ti.artist == self.band_name {
+                        self.band_url.clone()
+                    } else {
+                        None
+                    },
+                    spotify_id: None,
+                },
+                album_artist: crate::types::Artist {
                     name: self.band_name.clone(),
                     bandcamp_id: self.band_id.map(|id| id.to_string()),
                     bandcamp_url: self.band_url.clone(),

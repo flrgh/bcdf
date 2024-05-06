@@ -58,7 +58,6 @@ pub(crate) async fn connect() -> anyhow::Result<Client> {
 }
 
 impl Client {
-    #[tracing::instrument]
     pub(crate) async fn get_or_create_playlist(&self, state: &mut State) -> anyhow::Result<()> {
         if !state.has_spotify_tracks() {
             tracing::debug!(
@@ -94,8 +93,6 @@ impl Client {
         }
 
         tracing::debug!("creating new playlist");
-        let desc = format!("url: {}", state.blog_info.url);
-
         let pl = self
             .spotify
             .user_playlist_create(
@@ -103,7 +100,7 @@ impl Client {
                 &title,
                 Some(false),
                 Some(false),
-                Some(&desc),
+                Some(&state.blog_info.url),
             )
             .await
             .context("creating playlist")?;
@@ -113,12 +110,12 @@ impl Client {
         Ok(())
     }
 
-    pub(crate) async fn search(&self, track: &mut types::Track) -> anyhow::Result<()> {
-        if track.spotify_id.is_some() {
-            return Ok(());
-        }
-
-        let query = format!("{} artist:{}", track.title, track.artist.name);
+    async fn do_search(
+        &self,
+        track_title: &str,
+        artist: &str,
+    ) -> anyhow::Result<Vec<rspotify::model::FullTrack>> {
+        let query = format!("{} artist:{}", track_title, artist);
 
         let result = self
             .spotify
@@ -131,30 +128,50 @@ impl Client {
                 None,
             )
             .await
-            .with_context(|| format!("searching track: {}", track.title))?;
+            .with_context(|| format!("searching track: {}", track_title))?;
 
         let SearchResult::Tracks(tracks) = result else {
-            anyhow::bail!("expected tracklist search result");
+            tracing::warn!(?track_title, "unexpected track search results");
+            return Ok(Vec::new());
         };
 
         tracing::debug!(
-            track = track.title,
-            artist = track.artist.name,
-            album = track.album.title,
+            track = track_title,
+            artist = artist,
             results = tracks.items.len(),
             "search results",
         );
 
-        if tracks.items.is_empty() {
+        Ok(tracks.items)
+    }
+
+    pub(crate) async fn search(&self, track: &mut types::Track) -> anyhow::Result<()> {
+        if track.spotify_id.is_some() {
             return Ok(());
         }
+
+        let results = {
+            let results = self.do_search(&track.title, &track.artist.name).await?;
+
+            if results.is_empty() {
+                if track.artist.name == track.album_artist.name {
+                    return Ok(());
+                }
+
+                // search album artist next
+                self.do_search(&track.title, &track.album_artist.name)
+                    .await?
+            } else {
+                results
+            }
+        };
 
         let mut tm = TrackMatcher::new(track);
 
         let mut best_score = None;
         let mut best = None;
 
-        for result in tracks.items.iter() {
+        for result in results.iter() {
             let Some(score) = tm.score(result) else {
                 continue;
             };
@@ -244,7 +261,7 @@ impl Client {
                 if *track_pl_id == *id {
                     continue;
                 } else {
-                    anyhow::bail!("that's weird... this track has a playlist id ({}), but it doesn't match the playlist we want to add it to ({})", track_pl_id, id);
+                    tracing::warn!("that's weird... this track has a playlist id ({}), but it doesn't match the playlist we want to add it to ({})", track_pl_id, id);
                 }
             }
 

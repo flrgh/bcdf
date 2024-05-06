@@ -15,7 +15,9 @@ id3 = { version = "1.13.1", features = ["tokio"] }
 musicbrainz_rs = { version = "0.5.0", default-features = false, features = ["async"] }
 nucleo-matcher = "0.3.1"
 reqwest = { version = "0.12.3", features = ["stream"] }
-rspotify = { version = "0.13.0", features = ["cli"] }
+# https://github.com/ramsayleung/rspotify/pull/480
+#rspotify = { version = "0.13.1", features = ["cli"] }
+rspotify = { git = "https://github.com/ramsayleung/rspotify.git", features = ["cli"] }
 rss = { version = "2.0.7", features = ["url", "serde", "atom", "chrono", "with-serde"] }
 scraper = "0.19.0"
 serde = "1.0.197"

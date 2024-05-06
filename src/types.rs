@@ -22,6 +22,7 @@ pub(crate) struct Album {
 pub(crate) struct Track {
     pub(crate) title: String,
     pub(crate) artist: Artist,
+    pub(crate) album_artist: Artist,
     pub(crate) album: Album,
     pub(crate) duration: Duration,
     pub(crate) number: usize,
