@@ -93,6 +93,7 @@ pub(crate) struct BlogInfo {
 }
 
 fn get_meta(doc: &Html, name: &str) -> Option<String> {
+    // TODO: memoize or lazy_static all of the properties we use
     let title = Selector::parse(&format!(r#"meta[property="{name}"]"#)).unwrap();
 
     doc.select(&title)
@@ -104,6 +105,7 @@ impl BlogInfo {
     pub(crate) fn from_html(html: &str) -> Self {
         let doc = Html::parse_document(html);
 
+        // TODO: lazy_static
         let article = Selector::parse("#p-daily-article").unwrap();
 
         let mut tracks = vec![];
