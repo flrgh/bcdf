@@ -7,6 +7,7 @@ use rspotify::model::{
 use rspotify::prelude::*;
 use rspotify::{AuthCodeSpotify, Credentials};
 
+use crate::metrics;
 use crate::search::TrackMatcher;
 use crate::state::State;
 use crate::types;
@@ -107,6 +108,8 @@ impl Client {
 
         state.spotify_playlist_id = Some(pl.id.to_string());
 
+        metrics::inc(metrics::SpotifyPlaylistsCreated, 1);
+
         Ok(())
     }
 
@@ -116,6 +119,8 @@ impl Client {
         artist: &str,
     ) -> anyhow::Result<Vec<rspotify::model::FullTrack>> {
         let query = format!("{} artist:{}", track_title, artist);
+
+        metrics::inc(metrics::SpotifyTrackSearchQueries, 1);
 
         let result = self
             .spotify
@@ -202,12 +207,17 @@ impl Client {
         tracing::info!("setting spotify id to {}", id);
         track.spotify_id = Some(id);
 
+        metrics::inc(metrics::TracksDiscoveredOnSpotify, 1);
+
         Ok(())
     }
 
     pub(crate) async fn exec(&self, state: &mut State) -> anyhow::Result<()> {
         for track in state.tracks.iter_mut() {
             self.search(track).await.context("searching track")?;
+            if track.spotify_id.is_none() {
+                metrics::inc(metrics::TracksMissingFromSpotify, 1);
+            }
         }
 
         self.get_or_create_playlist(state).await?;
@@ -273,12 +283,14 @@ impl Client {
             return Ok(());
         }
 
-        let res = self
-            .spotify
+        let num_tracks = add.len();
+
+        self.spotify
             .playlist_add_items(plid, add, None)
             .await
             .context("adding playlist items")?;
-        dbg!(res);
+
+        metrics::inc(metrics::TracksAddedToSpotifyPlaylist, num_tracks);
 
         Ok(())
     }

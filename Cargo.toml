@@ -12,6 +12,7 @@ chrono = { version = "0.4.35", features = ["serde"] }
 clap = { version = "4.5.4", features = ["derive"] }
 futures = "0.3.30"
 id3 = { version = "1.13.1", features = ["tokio"] }
+lazy_static = "1.4.0"
 musicbrainz_rs = { version = "0.5.0", default-features = false, features = ["async"] }
 nucleo-matcher = "0.3.1"
 reqwest = { version = "0.12.3", features = ["stream"] }
@@ -22,6 +23,7 @@ rss = { version = "2.0.7", features = ["url", "serde", "atom", "chrono", "with-s
 scraper = "0.19.0"
 serde = "1.0.197"
 serde_json = "1.0.114"
+strum = { version = "0.26.2", features = ["derive"] }
 tokio = { version = "1.36.0", features = ["rt", "macros", "rt-multi-thread"] }
 tracing = { version = "0.1.40", features = ["log", "async-await"] }
 tracing-subscriber = "0.3.18"

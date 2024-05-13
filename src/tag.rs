@@ -1,3 +1,4 @@
+use crate::metrics;
 use id3::{frame::ExtendedText, Tag, TagLike, Version};
 use std::collections::HashMap;
 
@@ -95,6 +96,7 @@ pub(crate) async fn tag(state: &crate::state::State) -> anyhow::Result<()> {
         if updated {
             tracing::info!(?fname, "tags updated, saving file");
             tag.write_to_path(fname, Version::Id3v24)?;
+            metrics::inc(metrics::TracksWithUpdatedTags, 1);
         } else {
             tracing::debug!(?fname, "no tags were changed");
         }

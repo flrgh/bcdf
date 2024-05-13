@@ -2,12 +2,16 @@ mod bandcamp;
 mod cli;
 mod download;
 mod feed;
+mod metrics;
 mod search;
 mod spotify;
 mod state;
 mod tag;
 mod types;
 mod util;
+
+#[macro_use]
+extern crate lazy_static;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -33,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
 
     for url in urls {
         tracing::info!("scanning post: {url}");
+        metrics::inc(metrics::BlogPostsChecked, 1);
 
         let info = bandcamp::BlogInfo::try_from_url(&url).await?;
 
@@ -49,6 +54,10 @@ async fn main() -> anyhow::Result<()> {
 
             tag::tag(&state).await?;
         }
+    }
+
+    for (metric, value) in metrics::summarize() {
+        println!("{metric} => {value}");
     }
 
     Ok(())

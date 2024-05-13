@@ -1,3 +1,4 @@
+use crate::metrics;
 use futures::stream::StreamExt;
 use reqwest::Client;
 use tokio::io::AsyncWriteExt;
@@ -47,6 +48,7 @@ pub(crate) async fn download(state: &crate::state::State) {
             }
 
             tracing::debug!(track.title, "finished downloading");
+            metrics::inc(metrics::TracksDownloaded, 1);
             Ok(())
         });
     }
