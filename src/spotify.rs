@@ -171,6 +171,10 @@ impl Client {
             }
         };
 
+        if results.is_empty() {
+            return Ok(());
+        }
+
         let mut tm = TrackMatcher::new(track);
 
         let mut best_score = None;
@@ -191,7 +195,7 @@ impl Client {
         }
 
         let Some(best) = best else {
-            tracing::debug!("no match for this track");
+            tracing::info!("no match for this track out of {} results from Spotify", results.len());
             return Ok(());
         };
 
