@@ -210,8 +210,7 @@ impl TrackMatcher {
 
         let mut duration: MatchResult<DURATION_WEIGHT> = MatchResult::new(0, 100);
         {
-            let diff = (result.duration - self.duration).abs();
-            let percent = (self.duration - diff).num_seconds() / self.duration.num_seconds();
+            let percent = 100 - (self.duration - result.duration).num_seconds().abs() / self.duration.num_seconds();
             assert!((0..=100).contains(&percent));
             duration.score = percent as u16;
         }
