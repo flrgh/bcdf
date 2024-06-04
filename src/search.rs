@@ -18,13 +18,11 @@ type SpotifyTrack = rspotify::model::FullTrack;
 
 fn normalize(s: &str) -> String {
     s.to_lowercase()
-        .replace(['“', '”'], "\"")
-        .replace('’', "'")
-        .replace(['(', ')'], "")
+        .replace(['“', '”', '"', '’', '\'', '(', ')'], "")
         .split(|c: char| c.is_whitespace())
         .filter(|s| {
             let s = s.trim();
-            !s.is_empty() && s != "-"
+            !s.is_empty() && s != "-" && s != "/" && s != ":"
         })
         .collect::<Vec<&str>>()
         .join(" ")
