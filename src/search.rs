@@ -14,6 +14,8 @@ const TRACKNUM_WEIGHT: u16 = 50;
 
 const MATCH_SCORE: f32 = 90.0;
 
+type SpotifyTrack = rspotify::model::FullTrack;
+
 fn normalize(s: &str) -> String {
     s.to_lowercase()
         .replace(['“', '”'], "\"")
@@ -161,15 +163,15 @@ impl TrackMatcher {
         }
     }
 
-    fn title_score(&mut self, result: &rspotify::model::FullTrack) -> MatchResult {
+    fn title_score(&mut self, result: &SpotifyTrack) -> MatchResult {
         self.title.score(&result.name)
     }
 
-    fn album_score(&mut self, result: &rspotify::model::FullTrack) -> MatchResult {
+    fn album_score(&mut self, result: &SpotifyTrack) -> MatchResult {
         self.album.score(&result.album.name)
     }
 
-    fn artist_score(&mut self, result: &rspotify::model::FullTrack) -> MatchResult {
+    fn artist_score(&mut self, result: &SpotifyTrack) -> MatchResult {
         result
             .artists
             .iter()
@@ -178,7 +180,7 @@ impl TrackMatcher {
             .unwrap_or_else(|| MatchResult::unmatched(self.artist.max))
     }
 
-    pub(crate) fn score(&mut self, result: &rspotify::model::FullTrack) -> Option<u32> {
+    pub(crate) fn score(&mut self, result: &SpotifyTrack) -> Option<u32> {
         let title = self.title_score(result);
 
         if title.percent() < MATCH_SCORE {
