@@ -21,7 +21,7 @@ fn normalize(s: &str) -> String {
         .replace(['“', '”'], "\"")
         .replace('’', "'")
         .replace(['(', ')'], "")
-        .split(' ')
+        .split(|c: char| c.is_whitespace())
         .filter(|s| {
             let s = s.trim();
             !s.is_empty() && s != "-"
