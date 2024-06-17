@@ -195,7 +195,10 @@ impl Client {
         }
 
         let Some(best) = best else {
-            tracing::info!("no match for this track out of {} results from Spotify", results.len());
+            tracing::info!(
+                "no match for this track out of {} results from Spotify",
+                results.len()
+            );
             return Ok(());
         };
 
