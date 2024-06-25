@@ -17,12 +17,27 @@ const MATCH_SCORE: f32 = 90.0;
 type SpotifyTrack = rspotify::model::FullTrack;
 
 fn normalize(s: &str) -> String {
+    let s = if s.len() > 3 {
+        s.strip_suffix('.').unwrap_or(s)
+    } else {
+        s
+    };
+
     s.to_lowercase()
         .replace(['“', '”', '"', '’', '\'', '(', ')'], "")
         .split(|c: char| c.is_whitespace())
-        .filter(|s| {
+        .filter_map(|s| {
             let s = s.trim();
-            !s.is_empty() && s != "-" && s != "/" && s != ":"
+
+            if s.is_empty() {
+                return None;
+            }
+
+            match s {
+                "-" | "/" | ":" => None,
+                "&" => Some("and"),
+                _ => Some(s)
+            }
         })
         .collect::<Vec<&str>>()
         .join(" ")
