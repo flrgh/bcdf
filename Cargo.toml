@@ -6,22 +6,22 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.81"
+anyhow = "1.0.86"
 audiotags = "0.5.0"
-chrono = { version = "0.4.35", features = ["serde"] }
-clap = { version = "4.5.4", features = ["derive"] }
+chrono = { version = "0.4.38", features = ["serde"] }
+clap = { version = "4.5.9", features = ["derive"] }
 futures = "0.3.30"
-id3 = { version = "1.13.1", features = ["tokio"] }
-lazy_static = "1.4.0"
+id3 = { version = "1.14.0", features = ["tokio"] }
+lazy_static = "1.5.0"
 musicbrainz_rs = { version = "0.5.0", default-features = false, features = ["async"] }
 nucleo-matcher = "0.3.1"
-reqwest = { version = "0.12.3", features = ["stream"] }
+reqwest = { version = "0.12.5", features = ["stream"] }
 rspotify = { version = "0.13.2", features = ["cli"] }
-rss = { version = "2.0.7", features = ["url", "serde", "atom", "chrono", "with-serde"] }
+rss = { version = "2.0.8", features = ["url", "serde", "atom", "chrono", "with-serde"] }
 scraper = "0.19.0"
-serde = "1.0.197"
-serde_json = "1.0.114"
-strum = { version = "0.26.2", features = ["derive"] }
-tokio = { version = "1.36.0", features = ["rt", "macros", "rt-multi-thread"] }
+serde = "1.0.204"
+serde_json = "1.0.120"
+strum = { version = "0.26.3", features = ["derive"] }
+tokio = { version = "1.38.0", features = ["rt", "macros", "rt-multi-thread"] }
 tracing = { version = "0.1.40", features = ["log", "async-await"] }
 tracing-subscriber = "0.3.18"
