@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use chrono::TimeDelta;
 use nucleo_matcher::{
     pattern::{Atom, AtomKind, CaseMatching, Normalization},
@@ -44,20 +46,19 @@ fn normalize(s: &str) -> String {
 }
 
 #[derive(Eq, PartialEq, PartialOrd)]
-struct MatchResult<const W: u16 = 1> {
+struct MatchResult {
     score: u16,
     max: u16,
+    weight: u16,
 }
 
-impl<const W: u16> MatchResult<W> {
-    const WEIGHT: u16 = W;
-
-    fn new(score: u16, max: u16) -> Self {
-        Self { score, max }
+impl MatchResult {
+    fn new(score: u16, max: u16, weight: u16) -> Self {
+        Self { score, max, weight }
     }
 
-    fn unmatched(max: u16) -> Self {
-        Self::new(0, max)
+    fn unmatched(max: u16, weight: u16) -> Self {
+        Self::new(0, max, weight)
     }
 
     fn percent(&self) -> f32 {
@@ -71,7 +72,7 @@ impl<const W: u16> MatchResult<W> {
     }
 
     fn weighted(&self) -> u32 {
-        (self.percent().round() as u32) * (Self::WEIGHT as u32)
+        (self.percent().round() as u32) * (self.weight as u32)
     }
 }
 
@@ -82,17 +83,58 @@ impl Ord for MatchResult {
     }
 }
 
+#[derive(Debug, Clone)]
+struct TrackTitle;
+#[derive(Debug, Clone)]
+struct Artist;
+#[derive(Debug, Clone)]
+struct Album;
+
+trait MatchType {
+    const WEIGHT: u16;
+
+    fn label() -> &'static str {
+        let ty = std::any::type_name::<Self>();
+
+        // extract the last bit of the type name
+        //
+        // bcdf::search::TrackTitle => TrackTitle
+        if let Some(pos) = ty.rfind("::") {
+            return &ty[pos + 2..];
+        }
+        ty
+    }
+
+    fn weight() -> u16 {
+        Self::WEIGHT
+    }
+}
+
+impl MatchType for TrackTitle {
+    const WEIGHT: u16 = TITLE_WEIGHT;
+}
+
+impl MatchType for Artist {
+    const WEIGHT: u16 = ARTIST_WEIGHT;
+}
+
+impl MatchType for Album {
+    const WEIGHT: u16 = ALBUM_WEIGHT;
+}
+
+
 #[derive(Debug)]
-struct StringMatcher<const W: u16 = 1> {
+struct StringMatcher<MT: MatchType> {
     matcher: Matcher,
     atom: Atom,
     buf: Vec<char>,
     max: u16,
     original: String,
     normalized: String,
+    _mt: PhantomData<MT>,
 }
 
-impl<const W: u16> StringMatcher<W> {
+impl<MT: MatchType> StringMatcher<MT> {
     fn new(s: &str) -> Self {
         let original = s.to_string();
         let normalized = normalize(s);
@@ -112,7 +154,7 @@ impl<const W: u16> StringMatcher<W> {
         let max = {
             let haystack = Utf32Str::new(&normalized, &mut buf);
             let max = atom.score(haystack, &mut matcher).unwrap_or_else(|| {
-                tracing::warn!("wtf, search for '{}' is bugged", s);
+                tracing::warn!("wtf, search for {} '{}' is bugged", MT::label(), s);
                 u16::MAX
             });
             assert!(max > 0);
@@ -127,23 +169,25 @@ impl<const W: u16> StringMatcher<W> {
             max,
             original,
             normalized,
+            _mt: Default::default()
         }
     }
 
-    fn score(&mut self, s: &str) -> MatchResult<W> {
+    fn score(&mut self, s: &str) -> MatchResult {
         if self.original == s {
-            tracing::info!("exact match for '{}'", s);
-            return MatchResult::new(self.max, self.max);
+            tracing::info!("exact match for {} '{}'", MT::label(), s);
+            return MatchResult::new(self.max, self.max, MT::weight());
         }
 
         let s = normalize(s);
         let haystack = Utf32Str::new(&s, &mut self.buf);
         let score = self.atom.score(haystack, &mut self.matcher).unwrap_or(0);
 
-        let mr = MatchResult::new(score, self.max);
+        let mr = MatchResult::new(score, self.max, MT::weight());
 
         tracing::info!(
-            "search '{}' in '{}' (normalized: '{}'): {}/{} ({})",
+            "search {} '{}' in '{}' (normalized: '{}'): {}/{} ({})",
+            MT::label(),
             s,
             self.original,
             self.normalized,
@@ -158,11 +202,21 @@ impl<const W: u16> StringMatcher<W> {
 
 #[derive(Debug)]
 pub(crate) struct TrackMatcher {
-    title: StringMatcher,
-    artist: StringMatcher,
-    album: StringMatcher,
+    title: StringMatcher<TrackTitle>,
+    artist: StringMatcher<Artist>,
+    album: StringMatcher<Album>,
     number: usize,
     duration: TimeDelta,
+}
+
+impl<T, MT> From<T> for StringMatcher<MT>
+where
+    T: AsRef<str>,
+    MT: MatchType
+{
+    fn from(value: T) -> Self {
+        Self::new(value.as_ref())
+    }
 }
 
 impl TrackMatcher {
@@ -190,7 +244,7 @@ impl TrackMatcher {
             .iter()
             .map(|art| self.artist.score(&art.name))
             .max()
-            .unwrap_or_else(|| MatchResult::unmatched(self.artist.max))
+            .unwrap_or_else(|| MatchResult::unmatched(self.artist.max, Artist::weight()))
     }
 
     pub(crate) fn score(&mut self, result: &SpotifyTrack) -> Option<u32> {
@@ -218,12 +272,12 @@ impl TrackMatcher {
             album.percent(),
         );
 
-        let mut tracknum: MatchResult<TRACKNUM_WEIGHT> = MatchResult::new(0, 100);
+        let mut tracknum = MatchResult::new(0, 100, TRACKNUM_WEIGHT);
         if album.percent() > MATCH_SCORE && result.track_number == (self.number as u32) {
             tracknum.score = 100;
         }
 
-        let mut duration: MatchResult<DURATION_WEIGHT> = MatchResult::new(0, 100);
+        let mut duration = MatchResult::new(0, 100, DURATION_WEIGHT);
         {
             let percent = 100
                 - (self.duration - result.duration).num_seconds().abs()
