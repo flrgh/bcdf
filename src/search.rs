@@ -248,3 +248,30 @@ impl TrackMatcher {
             * 100
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fuzzy_search() {
+        let cases = vec![
+            // (spotify result string, bandcamp title)
+            ("for toshiko: ii. to touch —", "for Toshiko, ii. to touch—"),
+            ("onward! to nowhere", "DISKORD - Onward! To Nowhere"),
+            ("desiree", "desirée"),
+            ("you cant negotiate with zombies", "You Can't Negotiate With Zombies [Debut Album]"),
+            ("are there not still fireflies", "Are There Not Still Fireflies?"),
+            ("laurie anderson", "Anne Waldman, Laurie Anderson"),
+            ("nativo vol. 1", "[NTV001] NATIVO VA VOL 1."),
+        ];
+
+        for (search_result, bandcamp_title) in cases {
+            // technically not all of our tests are track titles, but that
+            // doesn't matter here.
+            let mut matcher: StringMatcher<TrackTitle> = StringMatcher::new(bandcamp_title);
+            let result = matcher.score(search_result);
+            assert!(result.score > 0, "search for '{search_result}' in '{bandcamp_title}' yielded a zero score");
+        }
+    }
+}
