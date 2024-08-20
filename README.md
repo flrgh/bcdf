@@ -20,12 +20,15 @@ Options:
       --download-to <PATH>  Base directory for storing downloaded content [default: ./data]
       --no-download         Don't download anything
       --no-spotify          Don't create Spotify playlists
+      --url <URL>           Scan only a single url
   -h, --help                Print help
   -V, --version             Print version
 ```
 
 ## status
 
-I wrote `bcdf` for my own personal use. It works, but there are warts. I don't
-anticipate putting much effort into UX improvements/documentation to make it
-suitable for a wider audience, so manage your expectations accordingly.
+I created `bcdf` for my own personal use. While it does work, it is fairly
+unpolished and inelegant. At this moment I have no concrete plans to make it
+more usable/suitable to a wider audience (though I guess this could change), so
+manage your expectations accordingly. I'm generally open to receiving outside
+contributions, but please make an issue first to discuss.
