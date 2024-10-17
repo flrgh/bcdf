@@ -26,7 +26,7 @@ fn normalize(s: &str) -> String {
     };
 
     s.to_lowercase()
-        .replace(['“', '”', '"', '’', '\'', '(', ')', '`', '´'], "")
+        .replace(['“', '”', '"', '’', '\'', '(', ')', '`', '´', '[', ']'], "")
         .split(|c: char| c.is_whitespace())
         .filter_map(|s| {
             let s = s.trim();
