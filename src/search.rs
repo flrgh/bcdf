@@ -29,7 +29,7 @@ fn normalize(s: &str) -> String {
         .replace(['“', '”', '"', '’', '\'', '(', ')', '`', '´', '[', ']'], "")
         .split(|c: char| match c {
             '/' => true, // split "a/b" => "a b"
-            c => c.is_whitespace()
+            c => c.is_whitespace(),
         })
         .filter_map(|s| {
             let s = s.trim();
@@ -41,7 +41,7 @@ fn normalize(s: &str) -> String {
             match s {
                 "-" | "/" | ":" => None,
                 "&" => Some("and"),
-                _ => Some(s)
+                _ => Some(s),
             }
         })
         .collect::<Vec<&str>>()
@@ -125,7 +125,6 @@ impl MatchType for Album {
     const WEIGHT: u16 = ALBUM_WEIGHT;
 }
 
-
 #[derive(Debug)]
 struct StringMatcher<MT: MatchType> {
     matcher: Matcher,
@@ -172,7 +171,7 @@ impl<MT: MatchType> StringMatcher<MT> {
             max,
             original,
             normalized,
-            _mt: Default::default()
+            _mt: Default::default(),
         }
     }
 
@@ -215,7 +214,7 @@ pub(crate) struct TrackMatcher {
 impl<T, MT> From<T> for StringMatcher<MT>
 where
     T: AsRef<str>,
-    MT: MatchType
+    MT: MatchType,
 {
     fn from(value: T) -> Self {
         Self::new(value.as_ref())
@@ -317,8 +316,14 @@ mod tests {
             ("for toshiko: ii. to touch —", "for Toshiko, ii. to touch—"),
             ("onward! to nowhere", "DISKORD - Onward! To Nowhere"),
             ("desiree", "desirée"),
-            ("you cant negotiate with zombies", "You Can't Negotiate With Zombies [Debut Album]"),
-            ("are there not still fireflies", "Are There Not Still Fireflies?"),
+            (
+                "you cant negotiate with zombies",
+                "You Can't Negotiate With Zombies [Debut Album]",
+            ),
+            (
+                "are there not still fireflies",
+                "Are There Not Still Fireflies?",
+            ),
             ("laurie anderson", "Anne Waldman, Laurie Anderson"),
             ("nativo vol. 1", "[NTV001] NATIVO VA VOL 1."),
         ];
@@ -328,7 +333,10 @@ mod tests {
             // doesn't matter here.
             let mut matcher: StringMatcher<TrackTitle> = StringMatcher::new(bandcamp_title);
             let result = matcher.score(search_result);
-            assert!(result.score > 0, "search for '{search_result}' in '{bandcamp_title}' yielded a zero score");
+            assert!(
+                result.score > 0,
+                "search for '{search_result}' in '{bandcamp_title}' yielded a zero score"
+            );
         }
     }
 }
