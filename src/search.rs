@@ -27,7 +27,10 @@ fn normalize(s: &str) -> String {
 
     s.to_lowercase()
         .replace(['“', '”', '"', '’', '\'', '(', ')', '`', '´', '[', ']'], "")
-        .split(|c: char| c.is_whitespace())
+        .split(|c: char| match c {
+            '/' => true, // split "a/b" => "a b"
+            c => c.is_whitespace()
+        })
         .filter_map(|s| {
             let s = s.trim();
 
