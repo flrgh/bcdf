@@ -90,9 +90,18 @@ impl State {
 
         let dir = self.dirname();
 
-        for track in self.blog_info.tracks.iter() {
-            let fname = dir.join(track.meta_filename());
-            tracks.push(rehydrate(track.to_owned(), &fname)?);
+        for new in self.blog_info.tracks.iter() {
+            let fname = dir.join(new.meta_filename());
+
+            let track = if let Ok(mut old) = load::<Track>(&fname) {
+                old.download_url = new.download_url.clone().or(old.download_url);
+                old.clone()
+            } else {
+                new.clone()
+            };
+
+            save(&track, &fname)?;
+            tracks.push(track);
         }
 
         self.tracks = tracks;
@@ -103,7 +112,8 @@ impl State {
         let dir = PathBuf::from(dir);
         let path = filename(&info, &dir);
 
-        let mut state = if let Ok(state) = load::<Self>(&path) {
+        let mut state = if let Ok(mut state) = load::<Self>(&path) {
+            state.blog_info = info;
             state
         } else {
             Self::new(info)

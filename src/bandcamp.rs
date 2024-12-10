@@ -1,3 +1,4 @@
+use crate::http;
 use crate::types::{DateTime, Duration, Track};
 use scraper::{Html, Selector};
 use serde_json as json;
@@ -146,7 +147,14 @@ impl BlogInfo {
     }
 
     pub(crate) async fn try_from_url(url: &str) -> anyhow::Result<Self> {
-        let bytes = reqwest::get(url).await?.error_for_status()?.bytes().await?;
+        let client = http::client();
+        let req = client.get(url).build()?;
+        let bytes = client
+            .execute(req)
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
 
         let html = String::from_utf8(bytes.to_vec())?;
         Ok(Self::from_html(&html))

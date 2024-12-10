@@ -9,6 +9,7 @@ mod state;
 mod tag;
 mod types;
 mod util;
+mod http;
 
 #[macro_use]
 extern crate lazy_static;

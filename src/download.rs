@@ -1,13 +1,13 @@
+use crate::http;
 use crate::metrics;
 use futures::stream::StreamExt;
-use reqwest::Client;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 
 pub(crate) async fn download(state: &crate::state::State) {
     let mut set: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
-    let client = Client::new();
+    let client = http::client();
 
     for track in &state.tracks {
         let track = track.clone();
@@ -17,7 +17,6 @@ pub(crate) async fn download(state: &crate::state::State) {
             continue;
         };
 
-        let client = client.clone();
         let path = state.dirname().join(track.mp3_filename());
 
         if path.is_file() {
@@ -25,10 +24,13 @@ pub(crate) async fn download(state: &crate::state::State) {
             continue;
         }
 
+        let client = client.clone();
+
         set.spawn(async move {
             tracing::info!(track.title, "downloading");
 
-            let res = client.execute(client.get(url).build()?).await?;
+            let req = client.get(url).build()?;
+            let res = client.execute(req).await?;
 
             match res.status().as_u16() {
                 200 => {}
