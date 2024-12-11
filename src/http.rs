@@ -1,4 +1,4 @@
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, PRAGMA, CACHE_CONTROL, REFERER};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CACHE_CONTROL, PRAGMA, REFERER};
 use reqwest::Client;
 
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0";
@@ -9,12 +9,11 @@ const DEFAULT_HEADERS: &[(HeaderName, &str)] = &[
 ];
 
 pub(crate) fn client() -> reqwest::Client {
-    let headers = HeaderMap::from_iter(DEFAULT_HEADERS.iter().map(|(name, value)| {
-        (
-            name.clone(),
-            HeaderValue::from_static(value),
-        )
-    }));
+    let headers = HeaderMap::from_iter(
+        DEFAULT_HEADERS
+            .iter()
+            .map(|(name, value)| (name.clone(), HeaderValue::from_static(value))),
+    );
 
     Client::builder()
         .user_agent(USER_AGENT)

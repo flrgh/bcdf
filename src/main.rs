@@ -2,6 +2,7 @@ mod bandcamp;
 mod cli;
 mod download;
 mod feed;
+mod http;
 mod metrics;
 mod search;
 mod spotify;
@@ -9,7 +10,6 @@ mod state;
 mod tag;
 mod types;
 mod util;
-mod http;
 
 #[macro_use]
 extern crate lazy_static;
@@ -20,9 +20,13 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt::init();
 
-    let urls = match args.url {
-        Some(url) => Vec::from([url]),
-        None => feed::urls().await?,
+    let urls = if args.rescan {
+        state::blog_urls(&args)?
+    } else {
+        match args.url {
+            None => feed::urls().await?,
+            Some(url) => Vec::from([url]),
+        }
     };
 
     if urls.is_empty() {

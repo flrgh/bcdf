@@ -18,6 +18,10 @@ pub(crate) struct Args {
     /// Scan only a single url
     #[arg(long)]
     pub(crate) url: Option<String>,
+
+    /// Re-scan from the filesystem only
+    #[arg(long, default_value_t = false)]
+    pub(crate) rescan: bool,
 }
 
 pub(crate) fn args() -> Args {

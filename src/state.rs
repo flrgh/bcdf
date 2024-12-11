@@ -3,6 +3,7 @@ use serde_json as json;
 use std::path::{Path, PathBuf};
 
 pub(crate) const OUT_DIR: &str = "./data";
+const BLOG_INFO_FILENAME: &str = "info.json";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct State {
@@ -21,7 +22,7 @@ fn dirname(info: &BlogInfo, dir: &Path) -> PathBuf {
 }
 
 fn filename(info: &BlogInfo, dir: &Path) -> PathBuf {
-    dirname(info, dir).join("info.json")
+    dirname(info, dir).join(BLOG_INFO_FILENAME)
 }
 
 pub(crate) fn save<T: serde::Serialize>(t: &T, fname: &PathBuf) -> anyhow::Result<()> {
@@ -134,4 +135,46 @@ impl State {
             .iter()
             .any(|t| t.spotify_id.is_some() && t.spotify_playlist_id.is_none())
     }
+
+    pub(crate) fn needs_spotify_updates(&self) -> bool {
+        self.spotify_playlist_id.is_none()
+            || self
+                .tracks
+                .iter()
+                .any(|t| t.spotify_id.is_none() || t.spotify_playlist_id.is_none())
+    }
+
+    pub(crate) fn needs_downloads(&self) -> bool {
+        self.tracks.iter().any(|track| {
+            let path = self.dirname().join(track.mp3_filename());
+            !path.exists()
+        })
+    }
+}
+
+pub(crate) fn blog_urls(args: &crate::cli::Args) -> anyhow::Result<Vec<String>> {
+    let res = std::fs::read_dir(&args.download_to)?;
+
+    let mut urls = Vec::new();
+
+    for child in res {
+        let child = child?;
+        let fname = child.path().join(BLOG_INFO_FILENAME);
+
+        let Ok(state) = load::<State>(&fname) else {
+            continue;
+        };
+
+        if !args.no_spotify && state.needs_spotify_updates() {
+            urls.push(state.blog_info.url);
+            continue;
+        }
+
+        if !args.no_download && state.needs_downloads() {
+            urls.push(state.blog_info.url);
+            continue;
+        }
+    }
+
+    Ok(urls)
 }
