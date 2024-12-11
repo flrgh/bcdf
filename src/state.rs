@@ -54,19 +54,6 @@ pub(crate) fn load<T: for<'de> serde::Deserialize<'de>>(fname: &PathBuf) -> anyh
     Ok(serde_json::from_reader::<_, T>(fh)?)
 }
 
-pub(crate) fn rehydrate<T>(t: T, fname: &PathBuf) -> anyhow::Result<T>
-where
-    T: serde::Serialize + for<'de> serde::Deserialize<'de>,
-{
-    if let Ok(t) = load(fname) {
-        return Ok(t);
-    }
-
-    save(&t, fname)?;
-
-    Ok(t)
-}
-
 impl State {
     fn new(info: BlogInfo) -> Self {
         Self {
@@ -93,12 +80,8 @@ impl State {
         for new in self.blog_info.tracks.iter() {
             let fname = dir.join(new.meta_filename());
 
-            let track = if let Ok(mut old) = load::<Track>(&fname) {
-                old.download_url = new.download_url.clone().or(old.download_url);
-                old.clone()
-            } else {
-                new.clone()
-            };
+            let mut track = load::<Track>(&fname).unwrap_or_else(|_err| new.clone());
+            track.download_url = new.download_url.clone().or(track.download_url);
 
             save(&track, &fname)?;
             tracks.push(track);
