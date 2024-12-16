@@ -1,0 +1,61 @@
+[package]
+authors = [
+    "Ramsay Leung <ramsayleung@gmail.com>",
+    "Mario Ortiz Manero <marioortizmanero@gmail.com>"
+]
+name = "rspotify-http"
+version = "0.13.3"
+license = "MIT"
+description = "HTTP compatibility layer for RSpotify"
+homepage = "https://github.com/ramsayleung/rspotify"
+repository = "https://github.com/ramsayleung/rspotify"
+keywords = ["spotify", "api"]
+categories = ["api-bindings", "multimedia::audio"]
+edition = "2018"
+readme = "../README.md"
+
+[dependencies]
+# Temporary until https://github.com/rust-lang/rfcs/issues/2739, for
+# `maybe_async`.
+async-trait = { version = "0.1.51", optional = true }
+log = "0.4.14"
+maybe-async = "0.2.6"
+serde_json = "1.0.67"
+thiserror = "1.0.29"
+
+# Supported clients
+reqwest = { version = "0.12.1", default-features = false, features = ["json", "socks"], optional = true }
+ureq = { version = "2.2.0", default-features = false, features = ["json", "cookies", "socks-proxy"], optional = true }
+native-tls = { version = "0.2.11", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.11.0", features = ["macros", "rt-multi-thread"] }
+rspotify-model = { path = "../rspotify-model", version = "0.13.3" }
+
+[features]
+default = ["client-reqwest", "reqwest-default-tls"]
+
+# Available clients. By default they don't include a TLS so that it can be
+# configured.
+client-ureq = ["ureq", "__sync"]
+client-reqwest = ["reqwest", "__async"]
+
+# Passing the TLS features to reqwest.
+reqwest-default-tls = ["reqwest/default-tls"]
+reqwest-rustls-tls = ["reqwest/rustls-tls"]
+reqwest-native-tls = ["reqwest/native-tls"]
+reqwest-native-tls-vendored = ["reqwest/native-tls-vendored"]
+# Same for ureq.
+ureq-rustls-tls = ["ureq/tls"]
+ureq-rustls-tls-native-certs = ["ureq/tls", "ureq/native-certs"]
+ureq-native-tls = ["ureq/native-tls", "dep:native-tls"]
+
+# Internal features for checking async or sync compilation
+__async = ["async-trait"]
+__sync = ["maybe-async/is_sync"]
+
+[package.metadata.docs.rs]
+# We generate the docs for ureq so that the function signatures of the endpoints
+# don't look gnarly (because of `async-trait`).
+features = ["client-ureq"]
+no-default-features = true

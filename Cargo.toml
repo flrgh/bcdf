@@ -16,7 +16,7 @@ lazy_static = "1.5.0"
 musicbrainz_rs = { version = "0.5.0", default-features = false, features = ["async"] }
 nucleo-matcher = "0.3.1"
 reqwest = { version = "0.12.9", features = ["stream"] }
-rspotify = { version = "0.13.3", features = ["cli"] }
+rspotify = { path = "vendor/rspotify", version = "0.13.3", features = ["cli", "client-reqwest", "reqwest-default-tls"] }
 rss = { version = "2.0.11", features = ["url", "serde", "atom", "chrono", "with-serde"] }
 scraper = "0.19.1"
 serde = "1.0.215"

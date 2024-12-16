@@ -1,0 +1,179 @@
+[package]
+authors = [
+    "Ramsay Leung <ramsayleung@gmail.com>",
+    "Mario Ortiz Manero <marioortizmanero@gmail.com>"
+]
+name = "rspotify"
+version = "0.13.3"
+license = "MIT"
+readme = "README.md"
+description = "Spotify API wrapper"
+homepage = "https://github.com/ramsayleung/rspotify"
+repository = "https://github.com/ramsayleung/rspotify"
+keywords = ["spotify", "api"]
+categories = ["api-bindings", "multimedia::audio"]
+edition = "2021"
+rust-version = "1.56"
+
+[workspace]
+members = [
+    "rspotify-macros",
+    "rspotify-model",
+    "rspotify-http"
+]
+exclude = [
+    "examples/webapp"
+]
+
+[dependencies]
+rspotify-macros = { path = "rspotify-macros", version = "0.13.3" }
+rspotify-model = { path = "rspotify-model", version = "0.13.3" }
+rspotify-http = { path = "rspotify-http", version = "0.13.3", default-features = false }
+
+async-stream = { version = "0.3.2", optional = true }
+async-trait = { version = "0.1.51", optional = true }
+base64 = "0.22.0"
+chrono = { version = "0.4.35", features = ["serde"] }
+dotenvy = { version = "0.15.0", optional = true }
+futures = { version = "0.3.17", optional = true }
+
+log = "0.4.14"
+maybe-async = "0.2.6"
+serde = { version = "1.0.130", default-features = false }
+serde_json = "1.0.67"
+sha2 = "0.10.0"
+thiserror = "1.0.29"
+url = "2.2.2"
+webbrowser = { version = "1.0.0", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2.3", features = ["js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+getrandom = "0.2.3"
+
+[dev-dependencies]
+env_logger = { version = "0.11.0", default-features = false }
+futures-util = "0.3.17"
+wasm-bindgen-test = "0.3.34"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { version = "1.11.0", features = ["rt-multi-thread", "macros"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+tokio = { version = "1.11.0", features = ["rt", "macros"] }
+dotenvy_macro = { version = "0.15.7" }
+
+[features]
+default = ["client-reqwest", "reqwest-default-tls"]
+
+### Client ###
+cli = ["webbrowser"]
+env-file = ["dotenvy"]
+
+### HTTP ###
+# Available clients. By default they don't include a TLS so that it can be
+# configured.
+client-ureq = ["rspotify-http/client-ureq", "__sync"]
+client-reqwest = ["rspotify-http/client-reqwest", "__async"]
+
+# Passing the TLS features to reqwest.
+reqwest-default-tls = ["rspotify-http/reqwest-default-tls"]
+reqwest-rustls-tls = ["rspotify-http/reqwest-rustls-tls"]
+reqwest-native-tls = ["rspotify-http/reqwest-native-tls"]
+reqwest-native-tls-vendored = ["rspotify-http/reqwest-native-tls-vendored"]
+# Same for ureq.
+ureq-rustls-tls = ["rspotify-http/ureq-rustls-tls"]
+ureq-rustls-tls-native-certs = ["rspotify-http/ureq-rustls-tls-native-certs"]
+ureq-native-tls = ["rspotify-http/ureq-native-tls"]
+
+# Internal features for checking async or sync compilation
+__async = ["futures", "async-stream", "async-trait"]
+__sync = ["maybe-async/is_sync"]
+
+[package.metadata.docs.rs]
+# When generating the docs, we also want to include the CLI methods, and working
+# links for `dotenvy`. We generate them for ureq so that the function signatures
+# of the endpoints don't look gnarly (because of `async-trait`).
+features = ["cli", "env-file", "client-ureq"]
+no-default-features = true
+
+[[example]]
+name = "client_creds"
+required-features = ["env-file", "client-reqwest"]
+path = "examples/client_creds.rs"
+
+[[example]]
+name = "auth_code"
+required-features = ["env-file", "cli", "client-reqwest"]
+path = "examples/auth_code.rs"
+
+[[example]]
+name = "auth_code_pkce"
+required-features = ["env-file", "cli", "client-reqwest"]
+path = "examples/auth_code_pkce.rs"
+
+[[example]]
+name = "oauth_tokens"
+required-features = ["env-file", "cli", "client-reqwest"]
+path = "examples/oauth_tokens.rs"
+
+[[example]]
+name = "with_refresh_token"
+required-features = ["env-file", "cli", "client-reqwest"]
+path = "examples/with_refresh_token.rs"
+
+[[example]]
+name = "with_auto_reauth"
+required-features = ["env-file", "cli", "client-reqwest"]
+path = "examples/with_auto_reauth.rs"
+
+[[example]]
+name = "with_token_callback_fn"
+required-features = ["env-file", "cli", "client-reqwest"]
+path = "examples/with_token_callback_fn.rs"
+
+[[example]]
+name = "device"
+required-features = ["env-file", "cli", "client-ureq"]
+path = "examples/ureq/device.rs"
+
+[[example]]
+name = "me"
+required-features = ["env-file", "cli", "client-ureq"]
+path = "examples/ureq/me.rs"
+
+[[example]]
+name = "search"
+required-features = ["env-file", "client-ureq"]
+path = "examples/ureq/search.rs"
+            
+[[example]]
+name = "seek_track"
+required-features = ["env-file", "cli", "client-ureq"]
+path = "examples/ureq/seek_track.rs"
+
+[[example]]
+name = "threading"
+required-features = ["env-file", "client-ureq"]
+path = "examples/ureq/threading.rs"
+
+[[example]]
+name = "tasks"
+required-features = ["env-file", "client-reqwest"]
+path = "examples/tasks.rs"
+
+[[example]]
+name = "pagination_manual"
+required-features = ["env-file", "cli", "client-reqwest"]
+path = "examples/pagination_manual.rs"
+
+[[example]]
+name = "pagination_sync"
+required-features = ["env-file", "cli", "client-ureq"]
+path = "examples/pagination_sync.rs"
+
+[[example]]
+name = "pagination_async"
+required-features = ["env-file", "cli", "client-reqwest"]
+path = "examples/pagination_async.rs"
