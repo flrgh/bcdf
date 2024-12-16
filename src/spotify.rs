@@ -179,7 +179,7 @@ impl Client {
             return Ok(());
         }
 
-        let mut tm = TrackMatcher::new(track);
+        let mut tm = TrackMatcher::new(track)?;
 
         let mut best_score = None;
         let mut best = None;
@@ -214,7 +214,12 @@ impl Client {
             best.track_number
         );
 
-        let id = best.id.clone().map(|id| id.to_string()).unwrap();
+        let Some(ref id) = best.id else {
+            anyhow::bail!("Track: {best:?} does not have an ID");
+        };
+
+        let id = id.to_string();
+
         tracing::info!("setting spotify id to {}", id);
         track.spotify_id = Some(id);
 

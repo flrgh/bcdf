@@ -222,14 +222,14 @@ where
 }
 
 impl TrackMatcher {
-    pub(crate) fn new(track: &types::Track) -> Self {
-        Self {
+    pub(crate) fn new(track: &types::Track) -> anyhow::Result<Self> {
+        Ok(Self {
             title: StringMatcher::new(&track.title),
             artist: StringMatcher::new(&track.artist.name),
             album: StringMatcher::new(&track.album.title),
             number: track.number,
-            duration: TimeDelta::from_std(track.duration).unwrap(),
-        }
+            duration: TimeDelta::from_std(track.duration)?,
+        })
     }
 
     fn title_score(&mut self, result: &SpotifyTrack) -> MatchResult {

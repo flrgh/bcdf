@@ -56,8 +56,15 @@ pub(crate) async fn download(state: &crate::state::State) {
     }
 
     while let Some(res) = set.join_next().await {
-        if let Err(e) = res.unwrap() {
-            tracing::error!(error = ?e, "download failed");
+        match res {
+            Ok(join_res) => {
+                if let Err(error) = join_res {
+                    tracing::error!(?error, "download failed");
+                }
+            }
+            Err(error) => {
+                tracing::error!(?error, "download failed");
+            }
         }
     }
 }

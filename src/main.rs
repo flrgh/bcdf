@@ -11,6 +11,8 @@ mod tag;
 mod types;
 mod util;
 
+use anyhow::Context;
+
 #[macro_use]
 extern crate lazy_static;
 
@@ -19,6 +21,8 @@ async fn main() -> anyhow::Result<()> {
     let args = cli::args();
 
     tracing_subscriber::fmt::init();
+
+    let single_url = args.url.is_some();
 
     let urls = if args.rescan {
         state::blog_urls(&args)?
@@ -40,11 +44,23 @@ async fn main() -> anyhow::Result<()> {
         Some(spotify::connect().await?)
     };
 
+    let client = http::client();
     for url in urls {
         tracing::info!("scanning post: {url}");
         metrics::inc(metrics::BlogPostsChecked, 1);
 
-        let info = bandcamp::BlogInfo::try_from_url(&url).await?;
+        let info = bandcamp::BlogInfo::try_from_url(&url, &client)
+            .await
+            .with_context(|| format!("fetching blog info from {url}"));
+
+        let info = match info {
+            Ok(info) => info,
+            Err(e) if single_url => anyhow::bail!(e),
+            Err(e) => {
+                tracing::error!(?e, url);
+                continue;
+            }
+        };
 
         let mut state = state::State::try_get_or_create(info, &args.download_to)?;
 

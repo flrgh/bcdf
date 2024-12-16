@@ -1,9 +1,18 @@
-use crate::http;
 use crate::types::{DateTime, Duration, Track};
+use anyhow::Context;
 use scraper::{Html, Selector};
 use serde_json as json;
 
 pub(crate) const FEED_URL: &str = "https://daily.bandcamp.com/feed/";
+
+fn css_selector(s: &str) -> anyhow::Result<Selector> {
+    Ok(match Selector::parse(s) {
+        Ok(selector) => selector,
+        Err(e) => {
+            anyhow::bail!("generating a CSS selector '{s}': {e}");
+        }
+    })
+}
 
 #[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TrackInfo {
@@ -93,21 +102,21 @@ pub(crate) struct BlogInfo {
     pub(crate) raw: Vec<json::Value>,
 }
 
-fn get_meta(doc: &Html, name: &str) -> Option<String> {
+fn get_meta(doc: &Html, name: &str) -> anyhow::Result<String> {
     // TODO: memoize or lazy_static all of the properties we use
-    let title = Selector::parse(&format!(r#"meta[property="{name}"]"#)).unwrap();
-
-    doc.select(&title)
-        .map(|elem| elem.attr("content").unwrap().to_owned())
-        .next()
+    let selector = css_selector(&format!(r#"meta[property="{name}"]"#))?;
+    doc.select(&selector)
+        .find_map(|elem| elem.attr("content"))
+        .map(|res| res.to_owned())
+        .ok_or_else(|| anyhow::format_err!("no metadata content found for '{name}'"))
 }
 
 impl BlogInfo {
-    pub(crate) fn from_html(html: &str) -> Self {
+    pub(crate) fn from_html(html: &str) -> anyhow::Result<Self> {
         let doc = Html::parse_document(html);
 
         // TODO: lazy_static
-        let article = Selector::parse("#p-daily-article").unwrap();
+        let article = css_selector("#p-daily-article")?;
 
         let mut tracks = vec![];
         let mut raw: Vec<json::Value> = vec![];
@@ -116,9 +125,11 @@ impl BlogInfo {
 
         for elem in doc.select(&article) {
             if let Some(infos) = elem.attr("data-player-infos") {
-                raw.push(json::from_str(infos).unwrap());
+                raw.push(json::from_str(infos)?);
 
-                let parsed: Vec<PlayerInfo> = json::from_str(infos).unwrap();
+                let parsed: Vec<PlayerInfo> =
+                    json::from_str(infos).context("parsing PlayerInfo from BandCamp blog HTML")?;
+
                 for info in parsed.iter() {
                     idx += 1;
                     if let Some(mut track) = info.get_track(idx) {
@@ -129,25 +140,26 @@ impl BlogInfo {
             }
         }
 
-        let title = get_meta(&doc, "og:title").unwrap();
-        let published = get_meta(&doc, "article:published_time").unwrap();
-        let modified = get_meta(&doc, "article:modified_time").unwrap();
-        let url = get_meta(&doc, "og:url").unwrap();
-        let description = get_meta(&doc, "og:description").unwrap();
+        let title = get_meta(&doc, "og:title")?;
+        let published = get_meta(&doc, "article:published_time")?;
+        let modified = get_meta(&doc, "article:modified_time")?;
+        let url = get_meta(&doc, "og:url")?;
+        let description = get_meta(&doc, "og:description")?;
+        let published = published.parse()?;
+        let modified = modified.parse()?;
 
-        Self {
-            published: published.parse().unwrap(),
-            modified: modified.parse().unwrap(),
+        Ok(Self {
+            published,
+            modified,
             title,
             url,
             description,
             tracks,
             raw,
-        }
+        })
     }
 
-    pub(crate) async fn try_from_url(url: &str) -> anyhow::Result<Self> {
-        let client = http::client();
+    pub(crate) async fn try_from_url(url: &str, client: &reqwest::Client) -> anyhow::Result<Self> {
         let req = client.get(url).build()?;
         let bytes = client
             .execute(req)
@@ -157,6 +169,6 @@ impl BlogInfo {
             .await?;
 
         let html = String::from_utf8(bytes.to_vec())?;
-        Ok(Self::from_html(&html))
+        Self::from_html(&html)
     }
 }
