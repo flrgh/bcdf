@@ -118,7 +118,11 @@ impl Client {
         track_title: &str,
         artist: &str,
     ) -> anyhow::Result<Vec<rspotify::model::FullTrack>> {
-        let query = format!("{} artist:{}", track_title, artist);
+        // something isn't properly urlencoding `%` in the query string :(
+        let track_title = track_title.replace("%", "%25");
+        let artist = artist.replace("%", "%25");
+
+        let query = format!("track:{} artist:{}", track_title, artist);
 
         metrics::inc(metrics::SpotifyTrackSearchQueries, 1);
 
@@ -128,7 +132,7 @@ impl Client {
                 &query,
                 SearchType::Track,
                 Some(MARKET),
-                Some(IncludeExternal::Audio),
+                None,
                 Some(10),
                 None,
             )
@@ -221,7 +225,11 @@ impl Client {
 
     pub(crate) async fn exec(&self, state: &mut State) -> anyhow::Result<()> {
         for track in state.tracks.iter_mut() {
-            self.search(track).await.context("searching track")?;
+            if let Err(e) = self.search(track).await.context("searching track") {
+                tracing::error!(?track, error = ?e, "failed to search track");
+                metrics::inc(metrics::SpotifyErrors, 1);
+            };
+
             if track.spotify_id.is_none() {
                 metrics::inc(metrics::TracksMissingFromSpotify, 1);
             }

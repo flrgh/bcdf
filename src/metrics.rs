@@ -13,6 +13,7 @@ pub(crate) enum Metric {
     TracksAddedToSpotifyPlaylist,
     TracksWithUpdatedTags,
     SpotifyTrackSearchQueries,
+    SpotifyErrors,
 }
 
 type Metrics = HashMap<Metric, usize>;
