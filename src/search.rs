@@ -1,89 +1,113 @@
 use std::marker::PhantomData;
 
 use chrono::TimeDelta;
-use nucleo_matcher::{
-    pattern::{Atom, AtomKind, CaseMatching, Normalization},
-    Config, Matcher, Utf32Str,
-};
+use fuzzt::algorithms::jaro;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::types;
 
-const TITLE_WEIGHT: u16 = 1000;
-const ARTIST_WEIGHT: u16 = 500;
-const ALBUM_WEIGHT: u16 = 100;
-const DURATION_WEIGHT: u16 = 50;
-const TRACKNUM_WEIGHT: u16 = 50;
+const TITLE_WEIGHT: f64 = 100.0;
+const ARTIST_WEIGHT: f64 = 50.0;
+const ALBUM_WEIGHT: f64 = 10.0;
+const DURATION_WEIGHT: f64 = 5.0;
+const TRACKNUM_WEIGHT: f64 = 5.0;
 
-const MATCH_SCORE: f32 = 90.0;
+const MIN_TITLE_SCORE: f64 = 95.0;
+const MIN_ARTIST_SCORE: f64 = 90.0;
 
 type SpotifyTrack = rspotify::model::FullTrack;
 
 fn normalize(s: &str) -> String {
-    let s = if s.len() > 3 {
-        s.strip_suffix('.').unwrap_or(s)
-    } else {
-        s
-    };
+    fn replace_equivalent_char(c: char) -> char {
+        const REPLACE: &[(&[char], char)] = &[
+            (&['—'], '-'),
+            (&['“', '”'], '"'),
+            (&['‘', '’'], '\''),
+            (&['`', '´'], '\''),
+            (&['í'], 'i'),
+        ];
 
-    s.to_lowercase()
-        .replace(['“', '”', '"', '’', '\'', '(', ')', '`', '´', '[', ']'], "")
-        .split(|c: char| match c {
-            '/' => true, // split "a/b" => "a b"
-            c => c.is_whitespace(),
-        })
-        .filter_map(|s| {
-            let s = s.trim();
-
-            if s.is_empty() {
-                return None;
+        for (find, repl) in REPLACE {
+            if find.contains(&c) {
+                return *repl;
             }
-
-            match s {
-                "-" | "/" | ":" => None,
-                "&" => Some("and"),
-                _ => Some(s),
-            }
-        })
-        .collect::<Vec<&str>>()
-        .join(" ")
-}
-
-#[derive(Eq, PartialEq, PartialOrd)]
-struct MatchResult {
-    score: u16,
-    max: u16,
-    weight: u16,
-}
-
-impl MatchResult {
-    fn new(score: u16, max: u16, weight: u16) -> Self {
-        Self { score, max, weight }
-    }
-
-    fn unmatched(max: u16, weight: u16) -> Self {
-        Self::new(0, max, weight)
-    }
-
-    fn percent(&self) -> f32 {
-        assert!(self.score <= self.max);
-
-        if self.score == self.max {
-            return 100f32;
         }
 
-        (self.score as f32 / self.max as f32) * 100f32
+        c
     }
 
-    fn weighted(&self) -> u32 {
-        (self.percent().round() as u32) * (self.weight as u32)
+    fn keep_char(c: &char) -> bool {
+        const REMOVE: &[char] = &['(', ')', '[', ']'];
+        !REMOVE.contains(c)
     }
-}
 
-impl Ord for MatchResult {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        assert!(self.max == other.max);
-        self.score.cmp(&other.score)
+    fn strip_suffix(s: &str) -> String {
+        const STRIP_SUFFIXES: &[char] = &['!', '.', '?'];
+        s.strip_suffix(STRIP_SUFFIXES).unwrap_or(s).to_string()
     }
+
+    fn keep_segment(s: &&str) -> bool {
+        const DROP_SEGMENTS: &[&str] = &["-", "/", ":"];
+        !DROP_SEGMENTS.contains(s)
+    }
+
+    fn replace_segment(s: &str) -> &str {
+        const REPLACE_SEGMENTS: &[(&str, &str)] = &[("&", "and"), ("feat.", "feat")];
+
+        for (find, repl) in REPLACE_SEGMENTS {
+            if *find == s {
+                return repl;
+            }
+        }
+
+        s
+    }
+
+    fn is_segment_separator(c: char) -> bool {
+        match c {
+            '/' => true, // split "a/b" => "a b"
+            c => c.is_whitespace(),
+        }
+    }
+
+    fn trim_empty_segments(s: &str) -> Option<&str> {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+
+        Some(s)
+    }
+
+    let s = s.nfc().collect::<String>().to_lowercase();
+
+    if s.len() <= 8 {
+        return s;
+    }
+
+    let input = &s;
+
+    let s = strip_suffix(&s);
+
+    let normalized = s
+        .chars()
+        .map(replace_equivalent_char)
+        .filter(keep_char)
+        .collect::<String>()
+        .split(is_segment_separator)
+        .filter_map(trim_empty_segments)
+        .filter(keep_segment)
+        .map(replace_segment)
+        .collect::<Vec<&str>>()
+        .join(" ");
+
+    // did normalization produce a radically different value from the input?
+    let diff = (1.0 - jaro(input, &normalized)) * 100.0;
+    if diff > 50.0 {
+        tracing::warn!("normalize('{input}') => '{normalized}' with a difference of {diff}");
+    }
+
+    normalized
 }
 
 #[derive(Debug, Clone)]
@@ -94,8 +118,6 @@ struct Artist;
 struct Album;
 
 trait MatchType {
-    const WEIGHT: u16;
-
     fn label() -> &'static str {
         let ty = std::any::type_name::<Self>();
 
@@ -107,30 +129,14 @@ trait MatchType {
         }
         ty
     }
-
-    fn weight() -> u16 {
-        Self::WEIGHT
-    }
 }
 
-impl MatchType for TrackTitle {
-    const WEIGHT: u16 = TITLE_WEIGHT;
-}
-
-impl MatchType for Artist {
-    const WEIGHT: u16 = ARTIST_WEIGHT;
-}
-
-impl MatchType for Album {
-    const WEIGHT: u16 = ALBUM_WEIGHT;
-}
+impl MatchType for TrackTitle {}
+impl MatchType for Artist {}
+impl MatchType for Album {}
 
 #[derive(Debug)]
 struct StringMatcher<MT: MatchType> {
-    matcher: Matcher,
-    atom: Atom,
-    buf: Vec<char>,
-    max: u16,
     original: String,
     normalized: String,
     _mt: PhantomData<MT>,
@@ -140,65 +146,33 @@ impl<MT: MatchType> StringMatcher<MT> {
     fn new(s: &str) -> Self {
         let original = s.to_string();
         let normalized = normalize(s);
-        // FIXME: Evidently, I am not using this correctly, because it rarely
-        // ever works, even for strings that are trivially different :(
-        let atom = Atom::new(
-            &normalized,
-            CaseMatching::Ignore,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
-            true,
-        );
-
-        let mut matcher = Matcher::new(Config::DEFAULT);
-        let mut buf = Vec::new();
-
-        let max = {
-            let haystack = Utf32Str::new(&normalized, &mut buf);
-            let max = atom.score(haystack, &mut matcher).unwrap_or_else(|| {
-                tracing::warn!("wtf, search for {} '{}' is bugged", MT::label(), s);
-                u16::MAX
-            });
-            assert!(max > 0);
-
-            max
-        };
 
         Self {
-            matcher,
-            atom,
-            buf,
-            max,
             original,
             normalized,
             _mt: Default::default(),
         }
     }
 
-    fn score(&mut self, s: &str) -> MatchResult {
-        if self.original == s {
-            tracing::info!("exact match for {} '{}'", MT::label(), s);
-            return MatchResult::new(self.max, self.max, MT::weight());
-        }
+    fn score(&mut self, s: &str) -> f64 {
+        let norm = normalize(s);
 
-        let s = normalize(s);
-        let haystack = Utf32Str::new(&s, &mut self.buf);
-        let score = self.atom.score(haystack, &mut self.matcher).unwrap_or(0);
+        let score = if self.original.eq_ignore_ascii_case(s) {
+            tracing::debug!("exact match for {} '{}'", MT::label(), s);
+            100.0f64
+        } else {
+            jaro(&self.normalized, &norm) * 100f64
+        };
 
-        let mr = MatchResult::new(score, self.max, MT::weight());
-
-        tracing::info!(
-            "search {} '{}' in '{}' (normalized: '{}'): {}/{} ({})",
+        tracing::debug!(
+            "search({}) subject('{}'), candidate('{}') => {}%",
             MT::label(),
-            s,
-            self.original,
             self.normalized,
-            mr.score,
-            self.max,
-            mr.percent(),
+            norm,
+            score,
         );
 
-        mr
+        score
     }
 }
 
@@ -232,75 +206,67 @@ impl TrackMatcher {
         })
     }
 
-    fn title_score(&mut self, result: &SpotifyTrack) -> MatchResult {
+    fn title_score(&mut self, result: &SpotifyTrack) -> f64 {
         self.title.score(&result.name)
     }
 
-    fn album_score(&mut self, result: &SpotifyTrack) -> MatchResult {
+    fn album_score(&mut self, result: &SpotifyTrack) -> f64 {
         self.album.score(&result.album.name)
     }
 
-    fn artist_score(&mut self, result: &SpotifyTrack) -> MatchResult {
-        result
+    fn artist_score(&mut self, result: &SpotifyTrack) -> f64 {
+        let res = result
             .artists
             .iter()
-            .map(|art| self.artist.score(&art.name))
-            .max()
-            .unwrap_or_else(|| MatchResult::unmatched(self.artist.max, Artist::weight()))
+            .map(|art| (art.name.to_string(), self.artist.score(&art.name)))
+            .max_by(|a, b| (a.1).partial_cmp(&b.1).unwrap());
+
+        match res {
+            Some((artist, score)) => {
+                tracing::debug!("artist: {}, score: {}%", artist, score);
+
+                score
+            }
+            None => 0f64,
+        }
     }
 
-    pub(crate) fn score(&mut self, result: &SpotifyTrack) -> Option<u32> {
+    pub(crate) fn score(&mut self, result: &SpotifyTrack) -> Option<u64> {
         let title = self.title_score(result);
-
-        if title.percent() < MATCH_SCORE {
-            return None;
-        }
-
-        let album = self.album_score(result);
         let artist = self.artist_score(result);
+        let album = self.album_score(result);
 
-        tracing::info!(
-            "track: {}, score: {}/{} ({})",
-            result.name,
-            title.score,
-            self.title.max,
-            title.percent(),
-        );
-        tracing::info!(
-            "album: {}, score: {}/{} ({})",
-            result.album.name,
-            album.score,
-            self.album.max,
-            album.percent(),
-        );
-
-        let mut tracknum = MatchResult::new(0, 100, TRACKNUM_WEIGHT);
-        if album.percent() > MATCH_SCORE && result.track_number == (self.number as u32) {
-            tracknum.score = 100;
+        let mut tracknum = 0f64;
+        if album > MIN_TITLE_SCORE && result.track_number == (self.number as u32) {
+            tracknum = 100.0;
         }
 
-        let mut duration = MatchResult::new(0, 100, DURATION_WEIGHT);
-        {
+        let duration = {
             let percent = 100
                 - (self.duration - result.duration).num_seconds().abs()
                     / self.duration.num_seconds();
             assert!((0..=100).contains(&percent));
-            duration.score = percent as u16;
+            percent as f64
+        };
+
+        let score = (title * TITLE_WEIGHT)
+            + (artist * ARTIST_WEIGHT)
+            + (album * ALBUM_WEIGHT)
+            + (tracknum * TRACKNUM_WEIGHT)
+            + (duration * DURATION_WEIGHT);
+
+        let comp = (score as f32 / self.max_possible() as f32) * 100.0;
+        tracing::debug!("composite score: {comp}");
+
+        if title < MIN_TITLE_SCORE || artist < MIN_ARTIST_SCORE {
+            return None;
         }
 
-        let score = title.weighted()
-            + artist.weighted()
-            + album.weighted()
-            + tracknum.weighted()
-            + duration.weighted();
-
-        tracing::info!("composite score: {}/{}", score, self.max_possible());
-
-        Some(score)
+        Some(comp.round() as u64)
     }
 
-    fn max_possible(&self) -> u32 {
-        (TITLE_WEIGHT as u32 + ARTIST_WEIGHT as u32 + ALBUM_WEIGHT as u32 + TRACKNUM_WEIGHT as u32)
+    fn max_possible(&self) -> u64 {
+        (TITLE_WEIGHT as u64 + ARTIST_WEIGHT as u64 + ALBUM_WEIGHT as u64 + TRACKNUM_WEIGHT as u64)
             * 100
     }
 }
@@ -313,6 +279,7 @@ mod tests {
     fn fuzzy_search() {
         let cases = vec![
             // (spotify result string, bandcamp title)
+            ("hey, ily", "Hey, ily!"),
             ("for toshiko: ii. to touch —", "for Toshiko, ii. to touch—"),
             ("onward! to nowhere", "DISKORD - Onward! To Nowhere"),
             ("desiree", "desirée"),
@@ -334,7 +301,7 @@ mod tests {
             let mut matcher: StringMatcher<TrackTitle> = StringMatcher::new(bandcamp_title);
             let result = matcher.score(search_result);
             assert!(
-                result.score > 0,
+                result > 0.0,
                 "search for '{search_result}' in '{bandcamp_title}' yielded a zero score"
             );
         }

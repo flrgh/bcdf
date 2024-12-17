@@ -1,8 +1,7 @@
 use anyhow::Context;
 use futures::stream::TryStreamExt;
 use rspotify::model::{
-    Country, IncludeExternal, Market, PlayableId, PlaylistId, SearchResult, SearchType, TrackId,
-    UserId,
+    Country, Market, PlayableId, PlaylistId, SearchResult, SearchType, TrackId, UserId,
 };
 use rspotify::prelude::*;
 use rspotify::{AuthCodeSpotify, Credentials};
@@ -181,37 +180,27 @@ impl Client {
 
         let mut tm = TrackMatcher::new(track)?;
 
-        let mut best_score = None;
-        let mut best = None;
+        let best = results
+            .iter()
+            .filter_map(|result| Some((tm.score(result)?, result)))
+            .max_by(|(score_a, _), (score_b, _)| score_a.cmp(score_b));
 
-        for result in results.iter() {
-            let Some(score) = tm.score(result) else {
-                continue;
-            };
-
-            if match best_score {
-                Some(best_score) => best_score < score,
-                None => true,
-            } {
-                best = Some(result);
-                best_score = Some(score);
-            }
-        }
-
-        let Some(best) = best else {
+        let Some((score, best)) = best else {
             tracing::info!(
-                "no match for this track out of {} results from Spotify",
+                "no match for track('{}') out of {} results from Spotify",
+                track.title,
                 results.len()
             );
             return Ok(());
         };
 
-        tracing::debug!(
-            "Result track: {}, artist: {}, album: {}, # {}",
+        tracing::info!(
+            "Result track: {}, artist: {}, album: {}, # {}, score: {}",
             best.name,
             best.artists[0].name,
             best.album.name,
-            best.track_number
+            best.track_number,
+            score
         );
 
         let Some(ref id) = best.id else {
