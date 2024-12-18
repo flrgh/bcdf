@@ -159,19 +159,17 @@ impl Client {
         }
 
         let results = {
-            let results = self.do_search(&track.title, &track.artist.name).await?;
+            let mut results = self.do_search(&track.title, &track.artist.name).await?;
 
-            if results.is_empty() {
-                if track.artist.name == track.album_artist.name {
-                    return Ok(());
-                }
-
-                // search album artist next
-                self.do_search(&track.title, &track.album_artist.name)
-                    .await?
-            } else {
-                results
+            if results.len() < 5 && track.artist.name != track.album_artist.name {
+                // also search by album artist if we didn't get enough results
+                results.extend(
+                    self.do_search(&track.title, &track.album_artist.name)
+                        .await?,
+                );
             }
+
+            results
         };
 
         if results.is_empty() {
