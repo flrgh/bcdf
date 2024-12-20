@@ -184,9 +184,6 @@ impl Client {
 
         let best = results
             .iter()
-            // .inspect(|t| {
-            //     dbg!(t);
-            // })
             .filter_map(|result| Some((tm.score(result)?, result)))
             .max_by(|(score_a, _), (score_b, _)| score_a.cmp(score_b));
 

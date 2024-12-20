@@ -307,21 +307,26 @@ impl<'a> TrackMatcher<'a> {
             };
 
             let subject = {
-                let mut artist: Vec<_> = self
-                    .artist
-                    .original
-                    .split_whitespace()
-                    .filter_map(|word| {
-                        let word = word.to_lowercase();
-                        match word.as_str() {
-                            "feat" | "featuring" | "feat." | "and" | "&" | "w/" => None,
-                            _ => Some(word),
+                let mut elems = vec![];
+                let mut cur = vec![];
+                for word in self.artist.original.split_whitespace() {
+                    match word.to_lowercase().as_str() {
+                        "feat" | "featuring" | "feat." | "and" | "&" | "w/" => {
+                            if !cur.is_empty() {
+                                let elem = cur.join(" ");
+                                elems.push(elem);
+                                cur.clear();
+                            }
                         }
-                    })
-                    .collect();
+                        _ => {
+                            cur.push(word);
+                        }
+                    }
+                }
 
-                artist.sort();
-                artist.join(" & ")
+                elems.push(cur.join(" "));
+                elems.sort();
+                elems.join(" & ")
             };
 
             let mut matcher = StringMatcher::<Artist>::new(&subject);
