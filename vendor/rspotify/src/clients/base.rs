@@ -284,7 +284,7 @@ where
         artist_id: ArtistId<'a>,
         include_groups: impl IntoIterator<Item = AlbumType> + Send + Copy + 'a,
         market: Option<Market>,
-    ) -> Paginator<'_, ClientResult<SimplifiedAlbum>> {
+    ) -> Paginator<'a, ClientResult<SimplifiedAlbum>> {
         paginate_with_ctx(
             (self, artist_id),
             move |(slf, artist_id), limit, offset| {
@@ -520,7 +520,7 @@ where
         &'a self,
         album_id: AlbumId<'a>,
         market: Option<Market>,
-    ) -> Paginator<'_, ClientResult<SimplifiedTrack>> {
+    ) -> Paginator<'a, ClientResult<SimplifiedTrack>> {
         paginate_with_ctx(
             (self, album_id),
             move |(slf, album_id), limit, offset| {
@@ -689,7 +689,7 @@ where
         &'a self,
         id: ShowId<'a>,
         market: Option<Market>,
-    ) -> Paginator<'_, ClientResult<SimplifiedEpisode>> {
+    ) -> Paginator<'a, ClientResult<SimplifiedEpisode>> {
         paginate_with_ctx(
             (self, id),
             move |(slf, id), limit, offset| {
@@ -826,7 +826,7 @@ where
         &'a self,
         locale: Option<&'a str>,
         country: Option<Market>,
-    ) -> Paginator<'_, ClientResult<Category>> {
+    ) -> Paginator<'a, ClientResult<Category>> {
         paginate(
             move |limit, offset| self.categories_manual(locale, country, Some(limit), Some(offset)),
             self.get_config().pagination_chunks,
@@ -871,7 +871,7 @@ where
         &'a self,
         category_id: &'a str,
         country: Option<Market>,
-    ) -> Paginator<'_, ClientResult<SimplifiedPlaylist>> {
+    ) -> Paginator<'a, ClientResult<SimplifiedPlaylist>> {
         paginate(
             move |limit, offset| {
                 self.category_playlists_manual(category_id, country, Some(limit), Some(offset))
@@ -1056,7 +1056,7 @@ where
         playlist_id: PlaylistId<'a>,
         fields: Option<&'a str>,
         market: Option<Market>,
-    ) -> Paginator<'_, ClientResult<PlaylistItem>> {
+    ) -> Paginator<'a, ClientResult<PlaylistItem>> {
         paginate_with_ctx(
             (self, playlist_id, fields),
             move |(slf, playlist_id, fields), limit, offset| {
@@ -1109,7 +1109,7 @@ where
     fn user_playlists<'a>(
         &'a self,
         user_id: UserId<'a>,
-    ) -> Paginator<'_, ClientResult<SimplifiedPlaylist>> {
+    ) -> Paginator<'a, ClientResult<SimplifiedPlaylist>> {
         paginate_with_ctx(
             (self, user_id),
             move |(slf, user_id), limit, offset| {

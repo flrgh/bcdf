@@ -1,31 +1,49 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
-use strum::{EnumCount, IntoEnumIterator};
+use strum::IntoEnumIterator;
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq, strum::Display, strum::EnumCount, strum::EnumIter)]
+#[derive(
+    Debug,
+    PartialOrd,
+    Ord,
+    Clone,
+    Hash,
+    Eq,
+    PartialEq,
+    strum::Display,
+    strum::EnumCount,
+    strum::EnumIter,
+)]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum Metric {
-    BlogPostsChecked,
+    BlogPostsSeen,
     SpotifyPlaylistsCreated,
     TracksDownloaded,
     TracksDiscoveredOnSpotify,
     TracksMissingFromSpotify,
     TracksAddedToSpotifyPlaylist,
     TracksWithUpdatedTags,
+    TracksSeen,
     SpotifyTrackSearchQueries,
     SpotifyErrors,
 }
 
-type Metrics = HashMap<Metric, usize>;
+type Metrics = BTreeMap<Metric, usize>;
 
 lazy_static! {
     static ref METRICS: Mutex<Metrics> = {
-        let mut map = HashMap::with_capacity(Metric::COUNT);
+        let mut map = BTreeMap::new();
         for m in Metric::iter() {
             map.insert(m, 0);
         }
 
         Mutex::new(map)
+    };
+    pub(crate) static ref MAX_STRING_WIDTH: usize = {
+        Metric::iter()
+            .map(|m| m.to_string().len())
+            .max()
+            .unwrap_or(0)
     };
 }
 
@@ -50,7 +68,7 @@ mod tests {
 
     #[test]
     fn metric_name() {
-        assert_eq!("blog_posts_checked", BlogPostsChecked.to_string());
+        assert_eq!("blog_posts_seen", BlogPostsSeen.to_string());
     }
 
     #[test]

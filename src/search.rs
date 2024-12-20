@@ -251,7 +251,7 @@ impl<'a> From<&'a types::Track> for MatchParams<'a> {
 
 #[derive(Debug)]
 pub(crate) struct TrackMatcher<'a> {
-    track: &'a crate::types::Track,
+    _track: &'a crate::types::Track,
     title: StringMatcher<TrackTitle>,
     artist: StringMatcher<Artist>,
     album: StringMatcher<Album>,
@@ -272,7 +272,7 @@ where
 impl<'a> TrackMatcher<'a> {
     pub(crate) fn new(track: &'a types::Track) -> anyhow::Result<TrackMatcher<'a>> {
         Ok(Self {
-            track,
+            _track: track,
             title: StringMatcher::new(&track.title),
             artist: StringMatcher::new(&track.artist.name),
             album: StringMatcher::new(&track.album.title),

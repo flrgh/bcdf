@@ -1,9 +1,9 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 pub(crate) use std::time::Duration;
 pub(crate) type DateTime = chrono::DateTime<chrono::Utc>;
 pub(crate) type SpotifyTrack = rspotify::model::FullTrack;
 
-#[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Artist {
     pub(crate) name: String,
     pub(crate) bandcamp_id: Option<String>,
@@ -33,7 +33,7 @@ where
     }
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Album {
     pub(crate) title: String,
     pub(crate) bandcamp_id: Option<String>,
@@ -63,7 +63,7 @@ where
     }
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Track {
     pub(crate) title: String,
     pub(crate) artist: Artist,
@@ -102,6 +102,15 @@ impl Track {
     }
 }
 
+pub(crate) fn update<T: Clone + Eq>(old: &mut Option<T>, other: &Option<T>) -> bool {
+    if old.is_none() && other.is_some() {
+        *old = other.clone();
+        true
+    } else {
+        false
+    }
+}
+
 impl Track {
     pub(crate) fn filename(&self, ext: &str) -> PathBuf {
         let title = self.title.replace('/', "_");
@@ -119,5 +128,17 @@ impl Track {
 
     pub(crate) fn meta_filename(&self) -> PathBuf {
         self.filename("json")
+    }
+
+    pub(crate) fn rehydrate(&mut self, from_disk: Track, fname: &Path) {
+        let mp3 = fname.with_extension("mp3");
+        if mp3.exists() {
+            // we already downloaded the mp3 successfully, so restore
+            // the existing download url
+            self.download_url = from_disk.download_url;
+        }
+
+        self.spotify_id = from_disk.spotify_id;
+        self.spotify_playlist_id = from_disk.spotify_playlist_id;
     }
 }

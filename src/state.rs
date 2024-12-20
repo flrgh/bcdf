@@ -11,6 +11,12 @@ pub(crate) struct State {
     pub(crate) tracks: Vec<Track>,
     pub(crate) spotify_playlist_id: Option<String>,
     root_dir: PathBuf,
+
+    #[serde(skip_serializing, default)]
+    need_save: bool,
+
+    #[serde(skip_serializing, default)]
+    need_save_tracks: bool,
 }
 
 fn dirname(info: &BlogInfo, dir: &Path) -> PathBuf {
@@ -55,6 +61,61 @@ pub(crate) fn load<T: for<'de> serde::Deserialize<'de>>(fname: &PathBuf) -> anyh
     Ok(serde_json::from_reader::<_, T>(fh)?)
 }
 
+pub(crate) fn update<T>(t: &T, fname: &PathBuf) -> anyhow::Result<()>
+where
+    T: serde::Serialize,
+    T: for<'de> serde::Deserialize<'de>,
+    T: Eq,
+{
+    if let Ok(current) = load::<T>(fname) {
+        if &current == t {
+            return Ok(());
+        }
+    }
+
+    save(t, fname)
+}
+
+fn remove_extraneous(dir: &Path, track: &Track) -> anyhow::Result<()> {
+    let dupe_meta = dir.join(track.meta_filename());
+    if dupe_meta.exists() {
+        tracing::warn!("removing extraneous track metadata file: {:?}", dupe_meta);
+        std::fs::remove_file(dupe_meta)?;
+    }
+
+    let dupe_mp3 = dir.join(track.mp3_filename());
+    if dupe_mp3.exists() {
+        tracing::warn!("removing extraneous track mp3 file: {:?}", dupe_mp3,);
+        std::fs::remove_file(dupe_mp3)?;
+    }
+
+    Ok(())
+}
+
+fn consolidate(dir: &Path, keep: &Track, dupe: &Track) -> anyhow::Result<()> {
+    let keep_meta = dir.join(keep.meta_filename());
+    let keep_mp3 = dir.join(keep.mp3_filename());
+
+    let dupe_meta = dir.join(dupe.meta_filename());
+    let dupe_mp3 = dir.join(dupe.mp3_filename());
+
+    if keep_meta == dupe_meta || keep_mp3 == dupe_mp3 {
+        return Ok(());
+    }
+
+    if keep_meta.exists() {
+        tracing::warn!("removing duplicate track metadata file: {:?}", dupe_meta,);
+        std::fs::remove_file(dupe_meta)?;
+
+        if keep_mp3.exists() && dupe_mp3.exists() {
+            tracing::warn!("removing duplicate track mp3 file: {:?}", dupe_mp3,);
+            std::fs::remove_file(dupe_mp3)?;
+        }
+    }
+
+    Ok(())
+}
+
 impl State {
     fn new(info: BlogInfo) -> Self {
         Self {
@@ -62,6 +123,8 @@ impl State {
             tracks: vec![],
             spotify_playlist_id: None,
             root_dir: OUT_DIR.into(),
+            need_save: true,
+            need_save_tracks: true,
         }
     }
 
@@ -81,11 +144,18 @@ impl State {
         for new in self.blog_info.tracks.iter() {
             let fname = dir.join(new.meta_filename());
 
-            let mut track = load::<Track>(&fname).unwrap_or_else(|_err| new.clone());
-            track.download_url = new.download_url.clone().or(track.download_url);
+            let mut new = new.clone();
 
-            save(&track, &fname)?;
-            tracks.push(track);
+            match load::<Track>(&fname) {
+                Ok(track) => {
+                    new.rehydrate(track, &fname);
+                }
+                Err(e) => {
+                    tracing::debug!("failed to load track from {fname:?}: {e}");
+                }
+            };
+
+            tracks.push(new);
         }
 
         self.tracks = tracks;
@@ -98,6 +168,7 @@ impl State {
 
         let mut state = if let Ok(mut state) = load::<Self>(&path) {
             state.blog_info = info;
+            state.need_save = true;
             state
         } else {
             Self::new(info)
@@ -106,24 +177,41 @@ impl State {
         state.root_dir = dir;
 
         state.rehydrate_tracks()?;
+        state.cleanup_files()?;
         Ok(state)
     }
 
-    pub(crate) fn save(&self) -> anyhow::Result<()> {
-        let mut fh = std::fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .create(true)
-            .open(self.filename())?;
+    pub(crate) fn save(&mut self) -> anyhow::Result<()> {
+        if self.need_save {
+            let mut fh = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .create(true)
+                .open(self.filename())?;
 
-        json::to_writer(&mut fh, &self)?;
+            json::to_writer(&mut fh, &self)?;
 
-        let dir = self.dirname();
-        for track in &self.tracks {
-            save(track, &dir.join(track.meta_filename()))?;
+            self.need_save = false;
+        }
+
+        if self.need_save_tracks {
+            let dir = self.dirname();
+            for track in &self.tracks {
+                update(track, &dir.join(track.meta_filename()))?;
+            }
+
+            self.need_save_tracks = false;
         }
 
         Ok(())
+    }
+
+    pub(crate) fn need_save(&mut self) {
+        self.need_save = true;
+    }
+
+    pub(crate) fn need_save_tracks(&mut self) {
+        self.need_save_tracks = true;
     }
 
     pub(crate) fn has_spotify_tracks(&self) -> bool {
@@ -150,21 +238,81 @@ impl State {
             !path.exists()
         })
     }
+
+    fn cleanup_files(&self) -> anyhow::Result<()> {
+        let dir = self.dirname();
+
+        let paths = std::fs::read_dir(&dir)?.filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.exists()
+                && path.is_file()
+                && path.extension().is_some_and(|ext| ext == "json")
+                && !path.ends_with(BLOG_INFO_FILENAME)
+            {
+                Some(path)
+            } else {
+                None
+            }
+        });
+
+        for path in paths {
+            let track = match load::<Track>(&path) {
+                Ok(track) => track,
+                Err(e) => {
+                    tracing::warn!("failed loading metadata file {path:?}: {e}");
+                    continue;
+                }
+            };
+
+            if self
+                .tracks
+                .iter()
+                .any(|other| other.meta_filename() == track.meta_filename())
+            {
+                continue;
+            }
+
+            if let Some(other) = self.tracks.iter().find(|other| {
+                other.title == track.title
+                    || (other.bandcamp_track_id.is_some()
+                        && other.bandcamp_track_id == track.bandcamp_track_id)
+            }) {
+                consolidate(&dir, other, &track)?;
+            } else {
+                remove_extraneous(&dir, &track)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+pub(crate) fn load_blogs(dir: &str) -> anyhow::Result<Vec<State>> {
+    Ok(std::fs::read_dir(dir)?
+        .filter_map(|child| {
+            let child = child.ok()?;
+            let fname = child.path().join(BLOG_INFO_FILENAME);
+            let mut state = load::<State>(&fname).ok()?;
+            state.rehydrate_tracks().ok()?;
+            if let Err(e) = state.cleanup_files() {
+                tracing::warn!(
+                    "Error with filename normalization for {}: {}",
+                    state.blog_info.title,
+                    e,
+                );
+            }
+            Some(state)
+        })
+        .collect())
 }
 
 pub(crate) fn blog_urls(args: &crate::cli::Args) -> anyhow::Result<Vec<String>> {
-    let res = std::fs::read_dir(&args.download_to)?;
+    let states = load_blogs(&args.download_to)?;
 
-    let mut urls = Vec::new();
+    let mut urls = Vec::with_capacity(states.len());
 
-    for child in res {
-        let child = child?;
-        let fname = child.path().join(BLOG_INFO_FILENAME);
-
-        let Ok(state) = load::<State>(&fname) else {
-            continue;
-        };
-
+    for state in states.into_iter() {
         if !args.no_spotify && state.needs_spotify_updates() {
             urls.push(state.blog_info.url);
             continue;

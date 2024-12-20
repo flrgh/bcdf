@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     let client = http::client();
     for url in urls {
         tracing::info!("scanning post: {url}");
-        metrics::inc(metrics::BlogPostsChecked, 1);
+        metrics::inc(metrics::BlogPostsSeen, 1);
 
         let info = bandcamp::BlogInfo::try_from_url(&url, &client)
             .await
@@ -63,10 +63,10 @@ async fn main() -> anyhow::Result<()> {
         };
 
         let mut state = state::State::try_get_or_create(info, &args.download_to)?;
+        metrics::inc(metrics::TracksSeen, state.tracks.len());
 
         if let Some(spotify) = &spotify {
             spotify.exec(&mut state).await?;
-            state.save()?;
         }
 
         if !args.no_download {
@@ -78,7 +78,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     for (metric, value) in metrics::summarize() {
-        println!("{metric} => {value}");
+        println!(
+            "{metric:width$} => {value}",
+            width = &metrics::MAX_STRING_WIDTH
+        );
     }
 
     Ok(())

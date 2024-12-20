@@ -87,7 +87,9 @@ impl Client {
         while let Some(pl) = res.try_next().await.context("fetching user playlists")? {
             if pl.name == title {
                 tracing::debug!(id = ?&pl.id, "found existing playlist");
-                state.spotify_playlist_id = Some(pl.id.to_string());
+                if types::update(&mut state.spotify_playlist_id, &Some(pl.id.to_string())) {
+                    state.need_save();
+                }
                 return Ok(());
             }
         }
@@ -105,7 +107,9 @@ impl Client {
             .await
             .context("creating playlist")?;
 
-        state.spotify_playlist_id = Some(pl.id.to_string());
+        if types::update(&mut state.spotify_playlist_id, &Some(pl.id.to_string())) {
+            state.need_save();
+        }
 
         metrics::inc(metrics::SpotifyPlaylistsCreated, 1);
 
@@ -180,6 +184,9 @@ impl Client {
 
         let best = results
             .iter()
+            // .inspect(|t| {
+            //     dbg!(t);
+            // })
             .filter_map(|result| Some((tm.score(result)?, result)))
             .max_by(|(score_a, _), (score_b, _)| score_a.cmp(score_b));
 
@@ -216,7 +223,11 @@ impl Client {
     }
 
     pub(crate) async fn exec(&self, state: &mut State) -> anyhow::Result<()> {
+        let mut changed = false;
+
         for track in state.tracks.iter_mut() {
+            let before = track.spotify_id.is_none();
+
             if let Err(e) = self.search(track).await.context("searching track") {
                 tracing::error!(?track, error = ?e, "failed to search track");
                 metrics::inc(metrics::SpotifyErrors, 1);
@@ -225,6 +236,14 @@ impl Client {
             if track.spotify_id.is_none() {
                 metrics::inc(metrics::TracksMissingFromSpotify, 1);
             }
+
+            if track.spotify_id.is_none() != before {
+                changed = true;
+            }
+        }
+
+        if changed {
+            state.need_save_tracks();
         }
 
         self.get_or_create_playlist(state).await?;
@@ -241,11 +260,11 @@ impl Client {
             return Ok(());
         }
 
-        let Some(ref id) = state.spotify_playlist_id else {
+        let Some(id) = state.spotify_playlist_id.clone() else {
             return Ok(());
         };
 
-        let plid = PlaylistId::from_id_or_uri(id)?;
+        let plid = PlaylistId::from_id_or_uri(&id)?;
 
         let mut current_ids = std::collections::HashSet::new();
         let mut res = self
@@ -296,6 +315,9 @@ impl Client {
             .playlist_add_items(plid, add, None)
             .await
             .context("adding playlist items")?;
+
+        state.need_save_tracks();
+        state.need_save();
 
         metrics::inc(metrics::TracksAddedToSpotifyPlaylist, num_tracks);
 
