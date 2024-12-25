@@ -103,7 +103,7 @@ impl Track {
 }
 
 pub(crate) fn update<T: Clone + Eq>(old: &mut Option<T>, other: &Option<T>) -> bool {
-    if old.is_none() && other.is_some() {
+    if other.is_some() && old != other {
         *old = other.clone();
         true
     } else {

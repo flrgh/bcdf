@@ -107,9 +107,8 @@ impl Client {
             .await
             .context("creating playlist")?;
 
-        if types::update(&mut state.spotify_playlist_id, &Some(pl.id.to_string())) {
-            state.need_save();
-        }
+        state.spotify_playlist_id = Some(pl.id.to_string());
+        state.need_save();
 
         metrics::inc(metrics::SpotifyPlaylistsCreated, 1);
 
@@ -280,15 +279,12 @@ impl Client {
             current_ids.insert(track_id.uri());
         }
 
+        let mut updated = false;
         let mut add = vec![];
         for track in state.tracks.iter_mut() {
             let Some(ref spid) = track.spotify_id else {
                 continue;
             };
-
-            if current_ids.contains(spid) {
-                continue;
-            }
 
             if let Some(ref track_pl_id) = track.spotify_playlist_id {
                 if *track_pl_id == *id {
@@ -298,25 +294,34 @@ impl Client {
                 }
             }
 
+            if types::update(&mut track.spotify_playlist_id, &Some(id.to_owned())) {
+                updated = true;
+            }
+
+            if current_ids.contains(spid) {
+                continue;
+            }
+
             add.push(PlayableId::Track(TrackId::from_id_or_uri(spid)?));
-            track.spotify_playlist_id = Some(id.to_owned());
         }
 
-        if add.is_empty() {
-            return Ok(());
+        if !add.is_empty() {
+            updated = true;
+
+            let num_tracks = add.len();
+
+            self.spotify
+                .playlist_add_items(plid, add, None)
+                .await
+                .context("adding playlist items")?;
+
+            metrics::inc(metrics::TracksAddedToSpotifyPlaylist, num_tracks);
         }
 
-        let num_tracks = add.len();
-
-        self.spotify
-            .playlist_add_items(plid, add, None)
-            .await
-            .context("adding playlist items")?;
-
-        state.need_save_tracks();
-        state.need_save();
-
-        metrics::inc(metrics::TracksAddedToSpotifyPlaylist, num_tracks);
+        if updated {
+            state.need_save();
+            state.need_save_tracks();
+        }
 
         Ok(())
     }
