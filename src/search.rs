@@ -204,7 +204,7 @@ impl TrackDurationMatcher {
 
     fn score(&self, other: u64) -> f64 {
         let diff = self.duration.abs_diff(other);
-        let percent = (1 - (diff / self.duration)) * 100;
+        let percent = 1u64.saturating_sub(diff / self.duration) * 100;
         assert!((0..=100).contains(&percent));
         percent as f64
     }
