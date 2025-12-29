@@ -49,12 +49,12 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("scanning post: {url}");
         metrics::inc(metrics::BlogPostsSeen, 1);
 
-        let info = bandcamp::BlogInfo::try_from_url(&url, &client)
+        let post = bandcamp::BlogPost::try_from_url(&url, &client)
             .await
-            .with_context(|| format!("fetching blog info from {url}"));
+            .with_context(|| format!("fetching blog post from {url}"));
 
-        let info = match info {
-            Ok(info) => info,
+        let post = match post {
+            Ok(post) => post,
             Err(e) if single_url => anyhow::bail!(e),
             Err(e) => {
                 tracing::error!(?e, url);
@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-        let mut state = state::State::try_get_or_create(info, &args.download_to)?;
+        let mut state = state::State::try_get_or_create(post, &args.download_to)?;
         metrics::inc(metrics::TracksSeen, state.tracks.len());
 
         if let Some(spotify) = &spotify {

@@ -1,4 +1,4 @@
-use crate::{bandcamp::BlogInfo, types::Track};
+use crate::{bandcamp::BlogPost, types::Track};
 use serde_json as json;
 use std::path::{Path, PathBuf};
 
@@ -7,7 +7,7 @@ const BLOG_INFO_FILENAME: &str = "info.json";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct State {
-    pub(crate) blog_info: BlogInfo,
+    pub(crate) blog_info: BlogPost,
     pub(crate) tracks: Vec<Track>,
     pub(crate) spotify_playlist_id: Option<String>,
     root_dir: PathBuf,
@@ -19,7 +19,7 @@ pub(crate) struct State {
     need_save_tracks: bool,
 }
 
-fn dirname(info: &BlogInfo, dir: &Path) -> PathBuf {
+fn dirname(info: &BlogPost, dir: &Path) -> PathBuf {
     dir.join(format!(
         "{} - {}",
         info.published.format("%Y-%m-%d"),
@@ -27,7 +27,7 @@ fn dirname(info: &BlogInfo, dir: &Path) -> PathBuf {
     ))
 }
 
-fn filename(info: &BlogInfo, dir: &Path) -> PathBuf {
+fn filename(info: &BlogPost, dir: &Path) -> PathBuf {
     dirname(info, dir).join(BLOG_INFO_FILENAME)
 }
 
@@ -117,7 +117,7 @@ fn consolidate(dir: &Path, keep: &Track, dupe: &Track) -> anyhow::Result<()> {
 }
 
 impl State {
-    fn new(info: BlogInfo) -> Self {
+    fn new(info: BlogPost) -> Self {
         Self {
             blog_info: info,
             tracks: vec![],
@@ -162,7 +162,7 @@ impl State {
         Ok(())
     }
 
-    pub(crate) fn try_get_or_create(info: BlogInfo, dir: &str) -> anyhow::Result<Self> {
+    pub(crate) fn try_get_or_create(info: BlogPost, dir: &str) -> anyhow::Result<Self> {
         let dir = PathBuf::from(dir);
         let path = filename(&info, &dir);
 
