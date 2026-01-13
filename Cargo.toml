@@ -16,7 +16,7 @@ id3 = { version = "1.16.0", features = ["tokio"] }
 lazy_static = "1.5.0"
 musicbrainz_rs = { version = "0.5.0", default-features = false, features = ["async"] }
 reqwest = { version = "0.12.9", features = ["stream"] }
-rspotify = { path = "vendor/rspotify", version = "0.13.3", features = ["cli", "client-reqwest", "reqwest-default-tls"] }
+rspotify = { version = "0.15.3", features = ["cli", "client-reqwest", "reqwest-default-tls"] }
 rss = { version = "2.0.11", features = ["url", "serde", "atom", "chrono", "with-serde"] }
 scraper = "0.19.1"
 serde = "1.0.216"
