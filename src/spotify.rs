@@ -120,10 +120,6 @@ impl Client {
         track_title: &str,
         artist: &str,
     ) -> anyhow::Result<Vec<rspotify::model::FullTrack>> {
-        // something isn't properly urlencoding `%` in the query string :(
-        let track_title = track_title.replace("%", "%25");
-        let artist = artist.replace("%", "%25");
-
         let query = format!("track:{} artist:{}", track_title, artist);
 
         metrics::inc(metrics::SpotifyTrackSearchQueries, 1);
