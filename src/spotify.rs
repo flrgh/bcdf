@@ -268,7 +268,7 @@ impl Client {
             .playlist_items(plid.clone(), None, Some(MARKET));
 
         while let Some(item) = res.try_next().await.context("fetching playlist track")? {
-            let Some(track) = item.track else {
+            let Some(track) = item.item else {
                 continue;
             };
 
