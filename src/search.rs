@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use fuzzt::algorithms::jaro;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::types::{self, SpotifyTrack};
+use crate::types::{self, Duration, SpotifyTrack};
 
 const TITLE_WEIGHT: f64 = 100.0;
 const ARTIST_WEIGHT: f64 = 50.0;
@@ -13,6 +13,9 @@ const TRACKNUM_WEIGHT: f64 = 5.0;
 
 const MIN_TITLE_SCORE: f64 = 95.0;
 const MIN_ARTIST_SCORE: f64 = 90.0;
+
+const DURATION_MATCH: Duration = Duration::from_secs(2);
+const DURATION_LIMIT: Duration = Duration::from_secs(15);
 
 fn normalize(s: &str) -> String {
     fn replace_equivalent_char(c: char) -> char {
@@ -194,19 +197,28 @@ impl TrackNumMatcher {
 
 #[derive(Debug, Clone)]
 struct TrackDurationMatcher {
-    duration: u64,
+    duration: Duration,
 }
 
 impl TrackDurationMatcher {
-    fn new(duration: u64) -> Self {
+    fn new(duration: Duration) -> Self {
         Self { duration }
     }
 
-    fn score(&self, other: u64) -> f64 {
+    /// `None` disqualifies the candidate outright.
+    fn score(&self, other: Duration) -> Option<f64> {
         let diff = self.duration.abs_diff(other);
-        let percent = 1u64.saturating_sub(diff / self.duration) * 100;
-        assert!((0..=100).contains(&percent));
-        percent as f64
+
+        if diff <= DURATION_MATCH {
+            return Some(100.0);
+        } else if diff >= DURATION_LIMIT {
+            return None;
+        }
+
+        let falloff = (diff - DURATION_MATCH).as_secs_f64()
+            / (DURATION_LIMIT - DURATION_MATCH).as_secs_f64();
+
+        Some((1.0 - falloff) * 100.0)
     }
 }
 
@@ -215,7 +227,7 @@ struct MatchParams<'a> {
     artist: Vec<&'a str>,
     album: &'a str,
     number: usize,
-    duration: u64,
+    duration: Duration,
 }
 
 impl<'a> From<&'a types::SpotifyTrack> for MatchParams<'a> {
@@ -225,7 +237,7 @@ impl<'a> From<&'a types::SpotifyTrack> for MatchParams<'a> {
             artist: value.artists.iter().map(|a| a.name.as_str()).collect(),
             album: &value.album.name,
             number: value.track_number as usize,
-            duration: value.duration.num_seconds() as u64,
+            duration: value.duration.to_std().unwrap_or_default(),
         }
     }
 }
@@ -244,7 +256,7 @@ impl<'a> From<&'a types::Track> for MatchParams<'a> {
             artist: vec![&value.artist.name],
             album: &value.album.title,
             number: value.number,
-            duration: value.duration.as_secs(),
+            duration: value.duration,
         }
     }
 }
@@ -277,7 +289,7 @@ impl<'a> TrackMatcher<'a> {
             artist: StringMatcher::new(&track.artist.name),
             album: StringMatcher::new(&track.album.title),
             number: TrackNumMatcher::new(track.number),
-            duration: TrackDurationMatcher::new(track.duration.as_secs()),
+            duration: TrackDurationMatcher::new(track.duration),
         })
     }
 
@@ -362,7 +374,7 @@ impl<'a> TrackMatcher<'a> {
         self.number.score(result.number)
     }
 
-    fn duration_score(&self, result: &MatchParams) -> f64 {
+    fn duration_score(&self, result: &MatchParams) -> Option<f64> {
         self.duration.score(result.duration)
     }
 
@@ -376,7 +388,16 @@ impl<'a> TrackMatcher<'a> {
         let artist = self.artist_score(&result);
         let album = self.album_score(&result);
         let tracknum = self.track_number_score(&result);
-        let duration = self.duration_score(&result);
+
+        let Some(duration) = self.duration_score(&result) else {
+            tracing::debug!(
+                "rejecting '{}': duration differs from {:?} by more than {:?}",
+                result.title,
+                self.duration.duration,
+                DURATION_LIMIT,
+            );
+            return None;
+        };
 
         let score = (title * TITLE_WEIGHT)
             + (artist * ARTIST_WEIGHT)
@@ -490,6 +511,58 @@ mod tests {
         let other = {
             let mut other = track.clone();
             other.title = "nope nope bad title".to_string();
+            other
+        };
+
+        let mut matcher = TrackMatcher::new(&track).expect("should not fail");
+
+        let score = matcher.score_params((&other).into());
+
+        assert_eq!(None, score);
+    }
+
+    #[test]
+    fn duration_matcher() {
+        let matcher = TrackDurationMatcher::new(types::Duration::from_secs(180));
+
+        for secs in [178, 179, 180, 181, 182] {
+            assert_eq!(
+                Some(100.0),
+                matcher.score(types::Duration::from_secs(secs)),
+                "{secs}s should be indistinguishable from 180s"
+            );
+        }
+
+        for secs in [0, 90, 195, 240, 360] {
+            assert_eq!(
+                None,
+                matcher.score(types::Duration::from_secs(secs)),
+                "{secs}s should be disqualified"
+            );
+        }
+
+        let near = matcher
+            .score(types::Duration::from_secs(185))
+            .expect("185s is inside the limit");
+        let far = matcher
+            .score(types::Duration::from_secs(192))
+            .expect("192s is inside the limit");
+
+        assert!(near > far, "185s ({near}) should outrank 192s ({far})");
+    }
+
+    #[test]
+    fn track_matcher_wrong_duration() {
+        let track = {
+            let mut track = types::Track::new("title", "artist", "album");
+            track.duration = types::Duration::from_secs(180);
+            track.number = 2;
+            track
+        };
+
+        let other = {
+            let mut other = track.clone();
+            other.duration = types::Duration::from_secs(240);
             other
         };
 
