@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use strum::IntoEnumIterator;
 
 #[derive(
@@ -30,22 +30,21 @@ pub(crate) enum Metric {
 
 type Metrics = BTreeMap<Metric, usize>;
 
-lazy_static! {
-    static ref METRICS: Mutex<Metrics> = {
-        let mut map = BTreeMap::new();
-        for m in Metric::iter() {
-            map.insert(m, 0);
-        }
+static METRICS: LazyLock<Mutex<Metrics>> = LazyLock::new(|| {
+    let mut map = BTreeMap::new();
+    for m in Metric::iter() {
+        map.insert(m, 0);
+    }
 
-        Mutex::new(map)
-    };
-    pub(crate) static ref MAX_STRING_WIDTH: usize = {
-        Metric::iter()
-            .map(|m| m.to_string().len())
-            .max()
-            .unwrap_or(0)
-    };
-}
+    Mutex::new(map)
+});
+
+pub(crate) static MAX_STRING_WIDTH: LazyLock<usize> = LazyLock::new(|| {
+    Metric::iter()
+        .map(|m| m.to_string().len())
+        .max()
+        .unwrap_or(0)
+});
 
 fn metrics<'a>() -> std::sync::MutexGuard<'a, Metrics> {
     METRICS.lock().expect("metrics lock is poisoned!")

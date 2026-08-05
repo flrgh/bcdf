@@ -8,8 +8,8 @@ use rspotify::{AuthCodeSpotify, Credentials};
 
 use crate::metrics;
 use crate::search::TrackMatcher;
-use crate::state::State;
-use crate::types;
+use crate::store::Store;
+use crate::types::{self, BlogPost, SpotifyPlaylist};
 
 #[derive(Debug)]
 pub(crate) struct Client {
@@ -58,38 +58,42 @@ pub(crate) async fn connect() -> anyhow::Result<Client> {
 }
 
 impl Client {
-    pub(crate) async fn get_or_create_playlist(&self, state: &mut State) -> anyhow::Result<()> {
-        if !state.has_spotify_tracks() {
-            tracing::debug!(
-                title = state.blog_info.title,
-                "no spotify tracks found for playlist"
-            );
+    pub(crate) async fn get_or_create_playlist(
+        &self,
+        store: &Store,
+        post: &mut BlogPost,
+    ) -> anyhow::Result<()> {
+        if !post.has_spotify_tracks() {
+            tracing::debug!(title = post.title, "no spotify tracks found for playlist");
             return Ok(());
         }
 
-        if state.spotify_playlist_id.is_some() {
+        if post.spotify_playlist.is_some() {
             tracing::debug!(
-                title = state.blog_info.title,
+                title = post.title,
                 "no action needed: playlist already created"
             );
             return Ok(());
         }
 
-        let title = format!(
+        let name = format!(
             "Bandcamp - {} - {}",
-            state.blog_info.published.format("%Y-%m-%d"),
-            &state.blog_info.title
+            post.published.format("%Y-%m-%d"),
+            post.title
         );
 
-        tracing::debug!(name = &title, "searching for playlist");
+        tracing::debug!(name, "searching for playlist");
 
         let mut res = self.spotify.current_user_playlists();
         while let Some(pl) = res.try_next().await.context("fetching user playlists")? {
-            if pl.name == title {
+            if pl.name == name {
                 tracing::debug!(id = ?&pl.id, "found existing playlist");
-                if types::update(&mut state.spotify_playlist_id, &Some(pl.id.to_string())) {
-                    state.need_save();
-                }
+                let playlist = SpotifyPlaylist {
+                    id: pl.id.to_string(),
+                    name,
+                };
+                store.upsert_spotify_playlist(&post.url, &playlist)?;
+                post.spotify_playlist = Some(playlist);
                 return Ok(());
             }
         }
@@ -99,16 +103,20 @@ impl Client {
             .spotify
             .user_playlist_create(
                 self.user.clone(),
-                &title,
+                &name,
                 Some(false),
                 Some(false),
-                Some(&state.blog_info.url),
+                Some(&post.url),
             )
             .await
             .context("creating playlist")?;
 
-        state.spotify_playlist_id = Some(pl.id.to_string());
-        state.need_save();
+        let playlist = SpotifyPlaylist {
+            id: pl.id.to_string(),
+            name,
+        };
+        store.upsert_spotify_playlist(&post.url, &playlist)?;
+        post.spotify_playlist = Some(playlist);
 
         metrics::inc(metrics::SpotifyPlaylistsCreated, 1);
 
@@ -180,7 +188,7 @@ impl Client {
         let best = results
             .iter()
             .filter_map(|result| Some((tm.score(result)?, result)))
-            .max_by(|(score_a, _), (score_b, _)| score_a.cmp(score_b));
+            .max_by(|(score_a, _), (score_b, _)| score_a.total_cmp(score_b));
 
         let Some((score, best)) = best else {
             tracing::info!(
@@ -208,55 +216,48 @@ impl Client {
 
         tracing::info!("setting spotify id to {}", id);
         track.spotify_id = Some(id);
+        track.spotify_match_score = Some(score);
 
         metrics::inc(metrics::TracksDiscoveredOnSpotify, 1);
 
         Ok(())
     }
 
-    pub(crate) async fn exec(&self, state: &mut State) -> anyhow::Result<()> {
-        let mut changed = false;
+    pub(crate) async fn exec(&self, store: &Store, post: &mut BlogPost) -> anyhow::Result<()> {
+        let url = post.url.clone();
 
-        for track in state.tracks.iter_mut() {
-            let before = track.spotify_id.is_none();
-
+        for track in post.tracks.iter_mut() {
             if let Err(e) = self.search(track).await.context("searching track") {
                 tracing::error!(?track, error = ?e, "failed to search track");
                 metrics::inc(metrics::SpotifyErrors, 1);
             };
 
-            if track.spotify_id.is_none() {
-                metrics::inc(metrics::TracksMissingFromSpotify, 1);
-            }
-
-            if track.spotify_id.is_none() != before {
-                changed = true;
+            match track.spotify_id {
+                None => metrics::inc(metrics::TracksMissingFromSpotify, 1),
+                Some(_) => store.update_track_spotify(&url, track)?,
             }
         }
 
-        if changed {
-            state.need_save_tracks();
-        }
-
-        self.get_or_create_playlist(state).await?;
-        state.save()?;
-
-        self.add_tracks_to_playlist(state).await?;
-        state.save()?;
+        self.get_or_create_playlist(store, post).await?;
+        self.add_tracks_to_playlist(store, post).await?;
 
         Ok(())
     }
 
-    async fn add_tracks_to_playlist(&self, state: &mut State) -> anyhow::Result<()> {
-        if !state.needs_playlist_assignments() {
+    async fn add_tracks_to_playlist(
+        &self,
+        store: &Store,
+        post: &mut BlogPost,
+    ) -> anyhow::Result<()> {
+        if !post.needs_playlist_assignments() {
             return Ok(());
         }
 
-        let Some(id) = state.spotify_playlist_id.clone() else {
+        let Some(playlist) = &post.spotify_playlist else {
             return Ok(());
         };
 
-        let plid = PlaylistId::from_id_or_uri(&id)?;
+        let plid = PlaylistId::from_id_or_uri(&playlist.id)?;
 
         let mut current_ids = std::collections::HashSet::new();
         let mut res = self
@@ -275,26 +276,25 @@ impl Client {
             current_ids.insert(track_id.uri());
         }
 
-        let mut updated = false;
+        let url = post.url.clone();
+
         let mut add = vec![];
-        for track in state.tracks.iter_mut() {
+        for track in post.tracks.iter_mut() {
             let Some(ref spid) = track.spotify_id else {
                 continue;
             };
 
             if let Some(ref track_pl_id) = track.spotify_playlist_id {
-                if *track_pl_id == *id {
+                if *track_pl_id == *playlist.id {
                     continue;
                 } else {
-                    tracing::warn!("that's weird... this track has a playlist id ({}), but it doesn't match the playlist we want to add it to ({})", track_pl_id, id);
+                    tracing::warn!("that's weird... this track has a playlist id ({}), but it doesn't match the playlist we want to add it to ({})", track_pl_id, playlist.id);
                 }
             }
 
-            if types::update(&mut track.spotify_playlist_id, &Some(id.to_owned())) {
-                updated = true;
-            }
-
             if current_ids.contains(spid) {
+                track.spotify_playlist_id = Some(plid.to_string());
+                store.update_track_spotify(&url, track)?;
                 continue;
             }
 
@@ -302,21 +302,22 @@ impl Client {
         }
 
         if !add.is_empty() {
-            updated = true;
-
             let num_tracks = add.len();
 
             self.spotify
-                .playlist_add_items(plid, add, None)
+                .playlist_add_items(plid.clone(), add, None)
                 .await
                 .context("adding playlist items")?;
 
             metrics::inc(metrics::TracksAddedToSpotifyPlaylist, num_tracks);
-        }
 
-        if updated {
-            state.need_save();
-            state.need_save_tracks();
+            // only recorded once Spotify has actually accepted them
+            for track in post.tracks.iter_mut() {
+                if track.spotify_id.is_some() && track.spotify_playlist_id.is_none() {
+                    track.spotify_playlist_id = Some(plid.to_string());
+                    store.update_track_spotify(&url, track)?;
+                }
+            }
         }
 
         Ok(())

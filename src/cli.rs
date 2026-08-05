@@ -1,11 +1,13 @@
+use std::path::PathBuf;
+
 use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub(crate) struct Args {
-    /// Base directory for storing downloaded content
-    #[arg(long, value_name = "PATH", default_value_t = crate::state::OUT_DIR.to_string())]
-    pub(crate) download_to: String,
+    /// Base directory for storing state and downloaded mp3 files
+    #[arg(long, value_name = "DIR", default_value = crate::store::DEFAULT_DATA_DIR)]
+    pub(crate) data_dir: PathBuf,
 
     /// Don't download anything
     #[arg(long, default_value_t = false)]

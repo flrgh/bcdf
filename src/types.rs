@@ -1,9 +1,50 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 pub(crate) use std::time::Duration;
 pub(crate) type DateTime = chrono::DateTime<chrono::Utc>;
 pub(crate) type SpotifyTrack = rspotify::model::FullTrack;
 
-#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+/// A bandcamp daily post, its tracks, and the Spotify playlist they belong to.
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) struct BlogPost {
+    pub(crate) url: String,
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) published: DateTime,
+    pub(crate) modified: DateTime,
+
+    /// Where the post's mp3s live, relative to the store root. Derived from
+    /// the post when it is first seen and fixed thereafter, so a retitle
+    /// upstream doesn't orphan the files.
+    pub(crate) dir: PathBuf,
+
+    pub(crate) tracks: Vec<Track>,
+    pub(crate) spotify_playlist: Option<SpotifyPlaylist>,
+}
+
+impl BlogPost {
+    pub(crate) fn has_spotify_tracks(&self) -> bool {
+        self.tracks.iter().any(|t| t.spotify_id.is_some())
+    }
+
+    pub(crate) fn needs_playlist_assignments(&self) -> bool {
+        self.tracks
+            .iter()
+            .any(|t| t.spotify_id.is_some() && t.spotify_playlist_id.is_none())
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub(crate) struct SpotifyPlaylist {
+    pub(crate) id: String,
+
+    /// The name the playlist was created with. Spotify offers no lookup by id
+    /// for a playlist we may not own yet, so we re-find it by name -- and a
+    /// name re-derived from a since-retitled post finds nothing and creates a
+    /// duplicate.
+    pub(crate) name: String,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) struct Artist {
     pub(crate) name: String,
     pub(crate) bandcamp_id: Option<String>,
@@ -33,7 +74,7 @@ where
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) struct Album {
     pub(crate) title: String,
     pub(crate) bandcamp_id: Option<String>,
@@ -63,18 +104,19 @@ where
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, Clone)]
 pub(crate) struct Track {
     pub(crate) title: String,
     pub(crate) artist: Artist,
     pub(crate) album_artist: Artist,
     pub(crate) album: Album,
     pub(crate) duration: Duration,
-    pub(crate) number: usize,
-    pub(crate) bandcamp_playlist_track_number: usize,
+    pub(crate) album_track_number: usize,
+    pub(crate) post_track_number: usize,
     pub(crate) download_url: Option<String>,
-    pub(crate) bandcamp_track_id: Option<String>,
+    pub(crate) bandcamp_id: Option<String>,
     pub(crate) spotify_id: Option<String>,
+    pub(crate) spotify_match_score: Option<f64>,
     pub(crate) spotify_playlist_id: Option<String>,
 }
 
@@ -92,53 +134,24 @@ impl Track {
             album_artist: artist.into(),
             album: album.into(),
             duration: Default::default(),
-            number: Default::default(),
-            bandcamp_playlist_track_number: Default::default(),
+            album_track_number: Default::default(),
+            post_track_number: Default::default(),
             download_url: Default::default(),
-            bandcamp_track_id: Default::default(),
+            bandcamp_id: Default::default(),
             spotify_id: Default::default(),
+            spotify_match_score: Default::default(),
             spotify_playlist_id: Default::default(),
         }
     }
 }
 
-pub(crate) fn update<T: Clone + Eq>(old: &mut Option<T>, other: &Option<T>) -> bool {
-    if other.is_some() && old != other {
-        *old = other.clone();
-        true
-    } else {
-        false
-    }
-}
-
 impl Track {
-    pub(crate) fn filename(&self, ext: &str) -> PathBuf {
+    pub(crate) fn mp3_filename(&self) -> PathBuf {
         let title = self.title.replace('/', "_");
         let artist = self.artist.name.replace('/', "_");
-        let fname = format!(
-            "{:02} - {} - {}.{}",
-            self.bandcamp_playlist_track_number, artist, title, ext
-        );
-        PathBuf::from(fname)
-    }
-
-    pub(crate) fn mp3_filename(&self) -> PathBuf {
-        self.filename("mp3")
-    }
-
-    pub(crate) fn meta_filename(&self) -> PathBuf {
-        self.filename("json")
-    }
-
-    pub(crate) fn rehydrate(&mut self, from_disk: Track, fname: &Path) {
-        let mp3 = fname.with_extension("mp3");
-        if mp3.exists() {
-            // we already downloaded the mp3 successfully, so restore
-            // the existing download url
-            self.download_url = from_disk.download_url;
-        }
-
-        self.spotify_id = from_disk.spotify_id;
-        self.spotify_playlist_id = from_disk.spotify_playlist_id;
+        PathBuf::from(format!(
+            "{:02} - {} - {}.mp3",
+            self.post_track_number, artist, title
+        ))
     }
 }

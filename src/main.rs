@@ -6,15 +6,12 @@ mod http;
 mod metrics;
 mod search;
 mod spotify;
-mod state;
+mod store;
 mod tag;
 mod types;
 mod util;
 
 use anyhow::Context;
-
-#[macro_use]
-extern crate lazy_static;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,11 +21,22 @@ async fn main() -> anyhow::Result<()> {
 
     let single_url = args.url.is_some();
 
+    let mut store = store::Store::open(&args.data_dir)?;
+
     let urls = if args.rescan {
-        state::blog_urls(&args)?
+        let mut urls = Vec::new();
+        if !args.no_spotify {
+            urls.extend(store.posts_with_incomplete_spotify_data()?);
+        }
+        if !args.no_download {
+            urls.extend(store.posts_with_incomplete_downloads()?);
+        }
+        urls.sort();
+        urls.dedup();
+        urls
     } else {
         match args.url {
-            None => feed::urls().await?,
+            None => feed::urls(http::client()).await?,
             Some(url) => Vec::from([url]),
         }
     };
@@ -49,12 +57,16 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("scanning post: {url}");
         metrics::inc(metrics::BlogPostsSeen, 1);
 
-        let post = bandcamp::BlogPost::try_from_url(&url, &client)
-            .await
-            .with_context(|| format!("fetching blog post from {url}"));
+        let scraped = async {
+            let scrape = bandcamp::scrape(&url, client).await?;
+            let post = scrape.parse()?;
+            anyhow::Ok((scrape, post))
+        }
+        .await
+        .with_context(|| format!("scraping blog post from {url}"));
 
-        let post = match post {
-            Ok(post) => post,
+        let (scrape, post) = match scraped {
+            Ok(scraped) => scraped,
             Err(e) if single_url => anyhow::bail!(e),
             Err(e) => {
                 tracing::error!(?e, url);
@@ -62,18 +74,17 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-        let mut state = state::State::try_get_or_create(post, &args.download_to)?;
-        metrics::inc(metrics::TracksSeen, state.tracks.len());
+        let mut post = store.upsert_blog_post(post, &scrape)?;
+        let dir = store.post_dir(&post);
+        metrics::inc(metrics::TracksSeen, post.tracks.len());
 
         if let Some(spotify) = &spotify {
-            spotify.exec(&mut state).await?;
+            spotify.exec(&store, &mut post).await?;
         }
 
         if !args.no_download {
-            download::download(&state).await;
-            state.save()?;
-
-            tag::tag(&state).await?;
+            download::download(&dir, &post.tracks).await;
+            tag::tag(&dir, &post.tracks).await?;
         }
     }
 

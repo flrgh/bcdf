@@ -1,10 +1,12 @@
 use crate::metrics;
+use crate::types::Track;
 use id3::{frame::ExtendedText, Tag, TagLike, Version};
 use std::collections::HashMap;
+use std::path::Path;
 
-pub(crate) async fn tag(state: &crate::state::State) -> anyhow::Result<()> {
-    for track in &state.tracks {
-        let fname = state.dirname().join(track.mp3_filename());
+pub(crate) async fn tag(dir: &Path, tracks: &[Track]) -> anyhow::Result<()> {
+    for track in tracks {
+        let fname = dir.join(track.mp3_filename());
         if !fname.exists() {
             tracing::debug!(?track, filename = ?fname, "SKIP: file does not exist");
             continue;
@@ -34,9 +36,9 @@ pub(crate) async fn tag(state: &crate::state::State) -> anyhow::Result<()> {
             tag.set_album_artist(&track.album_artist.name);
         }
 
-        if updated || tag.track().unwrap_or(0) != track.number as u32 {
+        if updated || tag.track().unwrap_or(0) != track.album_track_number as u32 {
             updated = true;
-            tag.set_track(track.number as u32);
+            tag.set_track(track.album_track_number as u32);
         }
 
         let ext: HashMap<String, String> = HashMap::from_iter(
@@ -61,12 +63,12 @@ pub(crate) async fn tag(state: &crate::state::State) -> anyhow::Result<()> {
             });
         };
 
-        set_tag(&mut tag, "bandcamp_track_id", &track.bandcamp_track_id);
+        set_tag(&mut tag, "bandcamp_track_id", &track.bandcamp_id);
         set_tag(&mut tag, "spotify_track_id", &track.spotify_id);
         set_tag(
             &mut tag,
             "bandcamp_playlist_track_number",
-            &Some(track.bandcamp_playlist_track_number.to_string()),
+            &Some(track.post_track_number.to_string()),
         );
 
         set_tag(&mut tag, "bandcamp_artist_id", &track.artist.bandcamp_id);

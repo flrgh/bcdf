@@ -1,7 +1,8 @@
-use crate::types::{DateTime, Duration, Track};
+use crate::types::{BlogPost, DateTime, Duration, Track};
 use anyhow::Context;
 use scraper::{Html, Selector};
 use serde_json as json;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 pub(crate) const FEED_URL: &str = "https://daily.bandcamp.com/feed/";
@@ -63,7 +64,7 @@ selector!(
     HtmlSelector::try_new_meta
 );
 
-#[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, Clone, serde::Deserialize)]
 pub(crate) struct TrackInfo {
     pub(crate) artist: String,
 
@@ -83,7 +84,7 @@ impl TrackInfo {
     }
 }
 
-#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, serde::Deserialize)]
 pub(crate) struct PlayerData {
     pub(crate) title: String,
     pub(crate) tracklist: Vec<TrackInfo>,
@@ -130,53 +131,14 @@ impl PlayerData {
                     spotify_id: None,
                 },
                 duration: ti.audio_track_duration,
-                number: ti.track_number,
+                album_track_number: ti.track_number,
                 download_url: ti.download_url(),
-                bandcamp_track_id: ti.track_id.map(|id| id.to_string()),
+                bandcamp_id: ti.track_id.map(|id| id.to_string()),
                 spotify_id: None,
+                spotify_match_score: None,
                 spotify_playlist_id: None,
-                bandcamp_playlist_track_number: playlist_index,
+                post_track_number: playlist_index,
             })
-    }
-}
-
-#[derive(Debug, PartialEq, Clone, Default)]
-pub(crate) struct TrackList {
-    pub(crate) tracks: Vec<Track>,
-    pub(crate) raw: Vec<json::Value>,
-}
-
-impl TrackList {
-    pub(crate) fn try_from_html(doc: &Html) -> anyhow::Result<Self> {
-        let article = &*DAILY_ARTICLE;
-
-        let mut list = TrackList::default();
-
-        let mut idx = 0;
-
-        for matched in article
-            .select(doc)
-            .filter_map(|elem| elem.attr("data-player-infos"))
-        {
-            let infos: Vec<json::Value> =
-                json::from_str(matched).context("parsing 'data-player-infos' as JSON")?;
-
-            list.raw.extend(infos.clone());
-
-            for info in infos.into_iter().filter(|v| !v.is_null()) {
-                let info: PlayerData = json::from_value(info).context(format!(
-                    "parsing {} from JSON",
-                    std::any::type_name::<PlayerData>()
-                ))?;
-                idx += 1;
-                if let Some(mut track) = info.get_track(idx) {
-                    track.bandcamp_playlist_track_number = idx;
-                    list.tracks.push(track.clone());
-                }
-            }
-        }
-
-        Ok(list)
     }
 }
 
@@ -212,50 +174,14 @@ impl BlogMeta {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct BlogPost {
-    pub(crate) title: String,
-    pub(crate) url: String,
-    pub(crate) published: DateTime,
-    pub(crate) modified: DateTime,
-    pub(crate) description: String,
-    pub(crate) tracks: Vec<Track>,
-    pub(crate) raw: Vec<json::Value>,
+#[derive(Debug, Clone)]
+pub(crate) struct Scrape {
+    pub(crate) html: String,
+    pub(crate) fetched_at: DateTime,
 }
 
-impl BlogPost {
-    pub(crate) fn new(meta: BlogMeta, tracks: TrackList) -> Self {
-        let BlogMeta {
-            title,
-            url,
-            published,
-            modified,
-            description,
-        } = meta;
-
-        let TrackList { tracks, raw } = tracks;
-
-        Self {
-            published,
-            modified,
-            title,
-            url,
-            description,
-            tracks,
-            raw,
-        }
-    }
-
-    pub(crate) fn from_html(html: &str) -> anyhow::Result<Self> {
-        let doc = Html::parse_document(html);
-
-        let meta = BlogMeta::try_from_html(&doc).context("extracting blog metadata from HTML")?;
-        let tracks =
-            TrackList::try_from_html(&doc).context("extracting blog track list from HTML")?;
-        Ok(Self::new(meta, tracks))
-    }
-
-    pub(crate) async fn try_from_url(url: &str, client: &reqwest::Client) -> anyhow::Result<Self> {
+impl Scrape {
+    pub(crate) async fn fetch(url: &str, client: &reqwest::Client) -> anyhow::Result<Self> {
         let req = client.get(url).build()?;
         let bytes = client
             .execute(req)
@@ -264,7 +190,64 @@ impl BlogPost {
             .bytes()
             .await?;
 
-        let html = String::from_utf8(bytes.to_vec())?;
-        Self::from_html(&html)
+        Ok(Self {
+            html: String::from_utf8(bytes.to_vec())?,
+            fetched_at: chrono::Utc::now(),
+        })
     }
+
+    pub(crate) fn parse(&self) -> anyhow::Result<BlogPost> {
+        let doc = Html::parse_document(&self.html);
+
+        let meta = BlogMeta::try_from_html(&doc).context("extracting blog metadata from HTML")?;
+
+        let tracks = {
+            let mut tracks = Vec::new();
+            let mut idx = 0;
+            for matched in DAILY_ARTICLE
+                .select(&doc)
+                .filter_map(|elem| elem.attr("data-player-infos"))
+            {
+                let infos: Vec<json::Value> =
+                    json::from_str(matched).context("parsing 'data-player-infos' as JSON")?;
+
+                for info in infos.into_iter().filter(|v| !v.is_null()) {
+                    let info: PlayerData = json::from_value(info).context(format!(
+                        "parsing {} from JSON",
+                        std::any::type_name::<PlayerData>()
+                    ))?;
+                    idx += 1;
+                    if let Some(track) = info.get_track(idx) {
+                        tracks.push(track);
+                    }
+                }
+            }
+            tracks
+        };
+
+        let BlogMeta {
+            title,
+            url,
+            published,
+            modified,
+            description,
+        } = meta;
+
+        Ok(BlogPost {
+            dir: PathBuf::from(
+                format!("{} - {}", published.format("%Y-%m-%d"), title).replace('/', "_"),
+            ),
+            url,
+            title,
+            description,
+            published,
+            modified,
+            tracks,
+            spotify_playlist: None,
+        })
+    }
+}
+
+pub(crate) async fn scrape(url: &str, client: &reqwest::Client) -> anyhow::Result<Scrape> {
+    Scrape::fetch(url, client).await
 }

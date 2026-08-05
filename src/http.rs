@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CACHE_CONTROL, PRAGMA, REFERER};
 use reqwest::Client;
 
@@ -12,7 +14,7 @@ const DEFAULT_HEADERS: &[(HeaderName, &str)] = &[
     (REFERER, "https://daily.bandcamp.com/"),
 ];
 
-pub(crate) fn client() -> reqwest::Client {
+static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     let headers = HeaderMap::from_iter(
         DEFAULT_HEADERS
             .iter()
@@ -28,4 +30,8 @@ pub(crate) fn client() -> reqwest::Client {
         .default_headers(headers)
         .build()
         .expect("unreachable!")
+});
+
+pub(crate) fn client() -> &'static reqwest::Client {
+    &CLIENT
 }

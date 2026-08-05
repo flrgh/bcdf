@@ -215,8 +215,8 @@ impl TrackDurationMatcher {
             return None;
         }
 
-        let falloff = (diff - DURATION_MATCH).as_secs_f64()
-            / (DURATION_LIMIT - DURATION_MATCH).as_secs_f64();
+        let falloff =
+            (diff - DURATION_MATCH).as_secs_f64() / (DURATION_LIMIT - DURATION_MATCH).as_secs_f64();
 
         Some((1.0 - falloff) * 100.0)
     }
@@ -255,7 +255,7 @@ impl<'a> From<&'a types::Track> for MatchParams<'a> {
             title: &value.title,
             artist: vec![&value.artist.name],
             album: &value.album.title,
-            number: value.number,
+            number: value.album_track_number,
             duration: value.duration,
         }
     }
@@ -288,7 +288,7 @@ impl<'a> TrackMatcher<'a> {
             title: StringMatcher::new(&track.title),
             artist: StringMatcher::new(&track.artist.name),
             album: StringMatcher::new(&track.album.title),
-            number: TrackNumMatcher::new(track.number),
+            number: TrackNumMatcher::new(track.album_track_number),
             duration: TrackDurationMatcher::new(track.duration),
         })
     }
@@ -378,12 +378,12 @@ impl<'a> TrackMatcher<'a> {
         self.duration.score(result.duration)
     }
 
-    pub(crate) fn score(&mut self, result: &SpotifyTrack) -> Option<u64> {
+    pub(crate) fn score(&mut self, result: &SpotifyTrack) -> Option<f64> {
         let params = MatchParams::from(result);
         self.score_params(params)
     }
 
-    fn score_params(&mut self, result: MatchParams) -> Option<u64> {
+    fn score_params(&mut self, result: MatchParams) -> Option<f64> {
         let title = self.title_score(&result);
         let artist = self.artist_score(&result);
         let album = self.album_score(&result);
@@ -412,7 +412,7 @@ impl<'a> TrackMatcher<'a> {
             return None;
         }
 
-        Some(comp.floor() as u64)
+        Some(comp)
     }
 
     fn max_possible(&self) -> u64 {
@@ -466,7 +466,7 @@ mod tests {
         let track = {
             let mut track = types::Track::new("track", "artist", "album");
             track.duration = types::Duration::from_secs(30);
-            track.number = 2;
+            track.album_track_number = 2;
             track
         };
 
@@ -474,7 +474,7 @@ mod tests {
 
         let score = matcher.score_params((&track).into());
 
-        assert_eq!(Some(100), score);
+        assert_eq!(Some(100.0), score);
     }
 
     #[test]
@@ -482,7 +482,7 @@ mod tests {
         let track = {
             let mut track = types::Track::new("my track name!!", "artist", "album");
             track.duration = types::Duration::from_secs(30);
-            track.number = 2;
+            track.album_track_number = 2;
             track
         };
 
@@ -496,7 +496,10 @@ mod tests {
 
         let score = matcher.score_params((&other).into());
 
-        assert_eq!(Some(98), score);
+        assert!(
+            score.is_some_and(|s| (98.0..99.0).contains(&s)),
+            "expected a score in [98, 99), got {score:?}"
+        );
     }
 
     #[test]
@@ -504,7 +507,7 @@ mod tests {
         let track = {
             let mut track = types::Track::new("title", "artist", "album");
             track.duration = types::Duration::from_secs(30);
-            track.number = 2;
+            track.album_track_number = 2;
             track
         };
 
@@ -556,7 +559,7 @@ mod tests {
         let track = {
             let mut track = types::Track::new("title", "artist", "album");
             track.duration = types::Duration::from_secs(180);
-            track.number = 2;
+            track.album_track_number = 2;
             track
         };
 
@@ -578,7 +581,7 @@ mod tests {
         let track = {
             let mut track = types::Track::new("title", "artist", "album");
             track.duration = types::Duration::from_secs(30);
-            track.number = 2;
+            track.album_track_number = 2;
             track
         };
 
@@ -611,7 +614,7 @@ mod tests {
             let track = {
                 let mut track = types::Track::new("title", case.0, "album");
                 track.duration = types::Duration::from_secs(30);
-                track.number = 2;
+                track.album_track_number = 2;
                 track
             };
 
@@ -623,7 +626,7 @@ mod tests {
             let score = matcher.score_params(params);
 
             assert_eq!(
-                Some(100),
+                Some(100.0),
                 score,
                 "track: '{}', result: '{:?}'",
                 case.0,

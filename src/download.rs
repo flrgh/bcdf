@@ -1,15 +1,17 @@
 use crate::http;
 use crate::metrics;
+use crate::types::Track;
 use futures::stream::StreamExt;
+use std::path::Path;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 
-pub(crate) async fn download(state: &crate::state::State) {
+pub(crate) async fn download(dir: &Path, tracks: &[Track]) {
     let mut set: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
     let client = http::client();
 
-    for track in &state.tracks {
+    for track in tracks {
         let track = track.clone();
 
         let Some(url) = track.download_url.clone() else {
@@ -17,7 +19,7 @@ pub(crate) async fn download(state: &crate::state::State) {
             continue;
         };
 
-        let path = state.dirname().join(track.mp3_filename());
+        let path = dir.join(track.mp3_filename());
 
         if path.is_file() {
             tracing::debug!(track.title, "SKIP: exists");
