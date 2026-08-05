@@ -2,6 +2,7 @@
 name = "bcdf"
 version = "0.1.0"
 edition = "2021"
+description = "Follow the Bandcamp Daily blog: scrape posts, download mp3s, and build Spotify playlists"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -28,3 +29,6 @@ tokio = { version = "1.53.1", features = ["rt", "macros", "rt-multi-thread"] }
 tracing = { version = "0.1.44", features = ["log", "async-await"] }
 tracing-subscriber = "0.3.23"
 unicode-normalization = "0.1.25"
+
+[dev-dependencies]
+tempfile = "3"

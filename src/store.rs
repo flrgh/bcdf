@@ -2,7 +2,7 @@ use crate::bandcamp::Scrape;
 use crate::types::{Album, Artist, BlogPost, Duration, SpotifyPlaylist, Track};
 use anyhow::Context;
 use rusqlite::{named_params, Connection, OptionalExtension, Row, ToSql};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 pub(crate) const DEFAULT_DATA_DIR: &str = "./data";
@@ -79,6 +79,36 @@ const UPSERT_TRACK: &str = "
         album_bandcamp_id         = excluded.album_bandcamp_id,
         album_bandcamp_url        = excluded.album_bandcamp_url,
         album_spotify_id          = excluded.album_spotify_id";
+
+const POST_COLUMNS: &str = "url, dir, title, description, published_at, modified_at";
+
+impl TryFrom<&Row<'_>> for BlogPost {
+    type Error = rusqlite::Error;
+
+    fn try_from(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            url: row.get("url")?,
+            title: row.get("title")?,
+            description: row.get("description")?,
+            published: row.get("published_at")?,
+            modified: row.get("modified_at")?,
+            dir: PathBuf::from(row.get::<_, String>("dir")?),
+            tracks: Vec::new(),
+            spotify_playlist: None,
+        })
+    }
+}
+
+impl TryFrom<&Row<'_>> for SpotifyPlaylist {
+    type Error = rusqlite::Error;
+
+    fn try_from(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            name: row.get("name")?,
+        })
+    }
+}
 
 impl TryFrom<&Row<'_>> for Track {
     type Error = rusqlite::Error;
@@ -176,7 +206,7 @@ impl Store {
         self.root.join(&post.dir)
     }
 
-    pub(crate) fn upsert_blog_post(
+    pub(crate) fn upsert_post(
         &mut self,
         post: BlogPost,
         scrape: &Scrape,
@@ -287,7 +317,7 @@ impl Store {
         tx.commit()?;
 
         let stored = self
-            .select_blog_post(&post.url)?
+            .get_post(&post.url)?
             .with_context(|| format!("post {} vanished after being written", post.url))?;
 
         let path = self.post_dir(&stored);
@@ -297,39 +327,82 @@ impl Store {
         Ok(stored)
     }
 
-    pub(crate) fn select_blog_post(&self, url: &str) -> anyhow::Result<Option<BlogPost>> {
-        let row = self
+    pub(crate) fn get_post(&self, url: &str) -> anyhow::Result<Option<BlogPost>> {
+        let post: Option<BlogPost> = self
             .conn
             .query_row(
-                "SELECT dir, title, description, published_at, modified_at
-                 FROM posts WHERE url = :url",
+                &format!("SELECT {POST_COLUMNS} FROM posts WHERE url = :url"),
                 named_params! { ":url": url },
-                |row| {
-                    Ok((
-                        row.get::<_, String>("dir")?,
-                        row.get("title")?,
-                        row.get("description")?,
-                        row.get("published_at")?,
-                        row.get("modified_at")?,
-                    ))
-                },
+                |row| row.try_into(),
             )
             .optional()?;
 
-        let Some((dir, title, description, published, modified)) = row else {
+        let Some(mut post) = post else {
             return Ok(None);
         };
 
-        Ok(Some(BlogPost {
-            url: url.to_string(),
-            title,
-            description,
-            published,
-            modified,
-            dir: PathBuf::from(dir),
-            tracks: self.tracks(url)?,
-            spotify_playlist: self.spotify_playlist(url)?,
-        }))
+        post.tracks = self.tracks(url)?;
+        post.spotify_playlist = self.spotify_playlist(url)?;
+
+        Ok(Some(post))
+    }
+
+    pub(crate) fn list_posts(&self) -> anyhow::Result<Vec<BlogPost>> {
+        let mut tracks = self.tracks_by_post()?;
+        let mut playlists = self.spotify_playlists_by_post()?;
+
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {POST_COLUMNS} FROM posts ORDER BY published_at"
+        ))?;
+
+        let posts = stmt
+            .query_map([], |row| row.try_into())?
+            .collect::<rusqlite::Result<Vec<BlogPost>>>()?;
+
+        Ok(posts
+            .into_iter()
+            .map(|mut post| {
+                post.tracks = tracks.remove(&post.url).unwrap_or_default();
+                post.spotify_playlist = playlists.remove(&post.url);
+                post
+            })
+            .collect())
+    }
+
+    fn tracks_by_post(&self) -> anyhow::Result<HashMap<String, Vec<Track>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM tracks ORDER BY post_url, post_track_number")?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>("post_url")?, row.try_into()?))
+        })?;
+
+        let mut by_post: HashMap<String, Vec<Track>> = HashMap::new();
+        for row in rows {
+            let (post_url, track) = row?;
+            by_post.entry(post_url).or_default().push(track);
+        }
+
+        Ok(by_post)
+    }
+
+    fn spotify_playlists_by_post(&self) -> anyhow::Result<HashMap<String, SpotifyPlaylist>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, post_url, name FROM spotify_playlists")?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>("post_url")?, row.try_into()?))
+        })?;
+
+        let mut by_post = HashMap::new();
+        for row in rows {
+            let (post_url, playlist) = row?;
+            by_post.insert(post_url, playlist);
+        }
+
+        Ok(by_post)
     }
 
     pub(crate) fn update_track_spotify(&self, post_url: &str, track: &Track) -> anyhow::Result<()> {
@@ -396,13 +469,13 @@ impl Store {
             Ok((
                 row.get::<_, String>("post_url")?,
                 row.get::<_, String>("dir")?,
-                Track::try_from(row)?,
+                row.try_into()?,
             ))
         })?;
 
         let mut missing = BTreeSet::new();
         for row in rows {
-            let (url, dir, track) = row?;
+            let (url, dir, track): (String, String, Track) = row?;
             if !self.root.join(dir).join(track.mp3_filename()).exists() {
                 missing.insert(url);
             }
@@ -418,7 +491,7 @@ impl Store {
 
         let tracks = stmt
             .query_map(named_params! { ":post_url": post_url }, |row| {
-                Track::try_from(row)
+                row.try_into()
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
@@ -431,13 +504,109 @@ impl Store {
             .query_row(
                 "SELECT id, name FROM spotify_playlists WHERE post_url = :post_url",
                 named_params! { ":post_url": post_url },
-                |row| {
-                    Ok(SpotifyPlaylist {
-                        id: row.get("id")?,
-                        name: row.get("name")?,
-                    })
-                },
+                |row| row.try_into(),
             )
             .optional()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bandcamp::Scrape;
+
+    fn store(root: &tempfile::TempDir) -> Store {
+        let mut conn = Connection::open_in_memory().expect("in-memory database should open");
+        init_conn(&mut conn).expect("migrations should apply to an empty database");
+
+        Store {
+            conn,
+            root: root.path().to_path_buf(),
+        }
+    }
+
+    fn scrape() -> Scrape {
+        Scrape {
+            html: "<html></html>".to_string(),
+            fetched_at: chrono::Utc::now(),
+        }
+    }
+
+    fn post(url: &str, title: &str, published: &str, tracks: Vec<Track>) -> BlogPost {
+        let published = published.parse().expect("timestamp should be rfc3339");
+        BlogPost {
+            url: url.to_string(),
+            title: title.to_string(),
+            description: format!("{title} description"),
+            published,
+            modified: published,
+            dir: PathBuf::from(title),
+            tracks,
+            spotify_playlist: None,
+        }
+    }
+
+    fn track(number: usize, title: &str) -> Track {
+        let mut track = Track::new(title, "artist", "album");
+        track.post_track_number = number;
+        track.album_track_number = number;
+        track
+    }
+
+    #[test]
+    fn list_posts_agrees_with_get_post() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = store(&root);
+
+        let a = post(
+            "https://example.test/a",
+            "A",
+            "2024-01-01T00:00:00Z",
+            vec![track(1, "one"), track(2, "two")],
+        );
+        let b = post(
+            "https://example.test/b",
+            "B",
+            "2024-02-01T00:00:00Z",
+            vec![],
+        );
+
+        store.upsert_post(a, &scrape()).unwrap();
+        store.upsert_post(b, &scrape()).unwrap();
+
+        let expected: Vec<BlogPost> = ["https://example.test/a", "https://example.test/b"]
+            .iter()
+            .map(|url| store.get_post(url).unwrap().expect("post was just written"))
+            .collect();
+
+        assert_eq!(store.list_posts().unwrap(), expected);
+    }
+
+    #[test]
+    fn list_posts_orders_by_published_date() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = store(&root);
+
+        for (url, title, published) in [
+            ("https://example.test/late", "Late", "2024-03-01T00:00:00Z"),
+            (
+                "https://example.test/early",
+                "Early",
+                "2024-01-01T00:00:00Z",
+            ),
+        ] {
+            store
+                .upsert_post(post(url, title, published, vec![]), &scrape())
+                .unwrap();
+        }
+
+        let titles: Vec<String> = store
+            .list_posts()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.title)
+            .collect();
+
+        assert_eq!(titles, ["Early", "Late"]);
     }
 }

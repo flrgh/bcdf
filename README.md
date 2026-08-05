@@ -14,15 +14,20 @@ straight from Bandcamp for listening in a local media player.
 
 ```
 $ bcdf --help
-Usage: bcdf [OPTIONS]
+Usage: bcdf [OPTIONS] [COMMAND]
+
+Commands:
+  mp3   Manage downloaded mp3 files
+  help  Print this message or the help of the given subcommand(s)
 
 Options:
-      --download-to <PATH>  Base directory for storing downloaded content [default: ./data]
-      --no-download         Don't download anything
-      --no-spotify          Don't create Spotify playlists
-      --url <URL>           Scan only a single url
-  -h, --help                Print help
-  -V, --version             Print version
+      --data-dir <DIR>  Base directory for storing state and downloaded mp3 files [default: ./data]
+      --no-download     Don't download anything
+      --no-spotify      Don't create Spotify playlists
+      --url <URL>       Scan only a single url
+      --rescan          Re-scan from the filesystem only
+  -h, --help            Print help
+  -V, --version         Print version
 ```
 
 ## status
