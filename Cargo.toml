@@ -6,25 +6,25 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.94"
+anyhow = "1.0.104"
 audiotags = "0.5.0"
-chrono = { version = "0.4.39", features = ["serde"] }
-clap = { version = "4.5.23", features = ["derive"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.6.5", features = ["derive"] }
 flate2 = "1.1.9"
-futures = "0.3.31"
+futures = "0.3.33"
 fuzzt = "0.3.1"
-id3 = { version = "1.16.0", features = ["tokio"] }
+id3 = { version = "1.17.1", features = ["tokio"] }
 lazy_static = "1.5.0"
-musicbrainz_rs = { version = "0.5.0", default-features = false, features = ["async"] }
-reqwest = { version = "0.12.9", features = ["stream"] }
+musicbrainz_rs = { version = "0.13.0", default-features = false, features = ["async"] }
+reqwest = { version = "0.13.4", features = ["stream"] }
 rspotify = { version = "0.16.1", features = ["cli", "client-reqwest", "reqwest-default-tls"] }
-rss = { version = "2.0.11", features = ["url", "serde", "atom", "chrono", "with-serde"] }
+rss = { version = "2.1.0", features = ["url", "serde", "atom", "chrono", "with-serde"] }
 rusqlite = { version = "0.40.1", features = ["bundled", "chrono", "fallible_uint"] }
-scraper = "0.19.1"
-serde = "1.0.216"
-serde_json = "1.0.133"
-strum = { version = "0.26.3", features = ["derive"] }
-tokio = { version = "1.42.0", features = ["rt", "macros", "rt-multi-thread"] }
-tracing = { version = "0.1.41", features = ["log", "async-await"] }
-tracing-subscriber = "0.3.19"
-unicode-normalization = "0.1.24"
+scraper = "0.27.0"
+serde = "1.0.229"
+serde_json = "1.0.151"
+strum = { version = "0.28.0", features = ["derive"] }
+tokio = { version = "1.53.1", features = ["rt", "macros", "rt-multi-thread"] }
+tracing = { version = "0.1.44", features = ["log", "async-await"] }
+tracing-subscriber = "0.3.23"
+unicode-normalization = "0.1.25"
