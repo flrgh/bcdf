@@ -77,7 +77,6 @@ impl Cli {
             };
 
             let mut post = store.upsert_post(post, &scrape)?;
-            let dir = store.post_dir(&post);
             metrics::inc(metrics::TracksSeen, post.tracks.len());
 
             if let Some(spotify) = &spotify {
@@ -85,8 +84,8 @@ impl Cli {
             }
 
             if !self.no_download {
-                download::download(&dir, &post.tracks).await;
-                tag::tag(&dir, &post.tracks).await?;
+                download::download(store, &mut post).await?;
+                tag::tag(store, &post).await?;
             }
         }
 

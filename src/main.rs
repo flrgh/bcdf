@@ -5,6 +5,7 @@ mod feed;
 mod http;
 mod metrics;
 mod mp3;
+mod rename;
 mod run;
 mod search;
 mod spotify;

@@ -25,7 +25,7 @@ impl Cli {
 
         match self.resolved_command() {
             Command::Run => self.run.exec(&mut store).await,
-            Command::Mp3(mp3) => mp3.exec(&store).await,
+            Command::Mp3(mp3) => mp3.exec(&mut store).await,
         }
     }
 }

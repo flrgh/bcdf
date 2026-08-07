@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 pub(crate) use std::time::Duration;
 pub(crate) type DateTime = chrono::DateTime<chrono::Utc>;
 pub(crate) type SpotifyTrack = rspotify::model::FullTrack;
@@ -12,16 +11,21 @@ pub(crate) struct BlogPost {
     pub(crate) published: DateTime,
     pub(crate) modified: DateTime,
 
-    /// Where the post's mp3s live, relative to the store root. Derived from
-    /// the post when it is first seen and fixed thereafter, so a retitle
-    /// upstream doesn't orphan the files.
-    pub(crate) dir: PathBuf,
+    pub(crate) dir: String,
 
     pub(crate) tracks: Vec<Track>,
     pub(crate) spotify_playlist: Option<SpotifyPlaylist>,
 }
 
 impl BlogPost {
+    pub(crate) fn derive_post_dir(published: &DateTime, title: &str) -> String {
+        format!("{} - {}", published.format("%Y-%m-%d"), title).replace('/', "_")
+    }
+
+    pub(crate) fn derive_dir(&self) -> String {
+        Self::derive_post_dir(&self.published, &self.title)
+    }
+
     pub(crate) fn has_spotify_tracks(&self) -> bool {
         self.tracks.iter().any(|t| t.spotify_id.is_some())
     }
@@ -47,7 +51,7 @@ pub(crate) struct SpotifyPlaylist {
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) struct Artist {
     pub(crate) name: String,
-    pub(crate) bandcamp_id: Option<String>,
+    pub(crate) bandcamp_id: Option<u64>,
     pub(crate) bandcamp_url: Option<String>,
     pub(crate) spotify_id: Option<String>,
 }
@@ -77,7 +81,7 @@ where
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub(crate) struct Album {
     pub(crate) title: String,
-    pub(crate) bandcamp_id: Option<String>,
+    pub(crate) bandcamp_id: Option<u64>,
     pub(crate) bandcamp_url: Option<String>,
     pub(crate) spotify_id: Option<String>,
 }
@@ -114,10 +118,11 @@ pub(crate) struct Track {
     pub(crate) album_track_number: usize,
     pub(crate) post_track_number: usize,
     pub(crate) download_url: Option<String>,
-    pub(crate) bandcamp_id: Option<String>,
+    pub(crate) bandcamp_id: u64,
     pub(crate) spotify_id: Option<String>,
     pub(crate) spotify_match_score: Option<f64>,
     pub(crate) spotify_playlist_id: Option<String>,
+    pub(crate) filename: Option<String>,
 }
 
 #[cfg(test)]
@@ -141,17 +146,15 @@ impl Track {
             spotify_id: Default::default(),
             spotify_match_score: Default::default(),
             spotify_playlist_id: Default::default(),
+            filename: Default::default(),
         }
     }
 }
 
 impl Track {
-    pub(crate) fn mp3_filename(&self) -> PathBuf {
+    pub(crate) fn derive_filename(&self) -> String {
         let title = self.title.replace('/', "_");
         let artist = self.artist.name.replace('/', "_");
-        PathBuf::from(format!(
-            "{:02} - {} - {}.mp3",
-            self.post_track_number, artist, title
-        ))
+        format!("{:02} - {} - {}.mp3", self.post_track_number, artist, title)
     }
 }

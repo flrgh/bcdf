@@ -2,7 +2,6 @@ use crate::types::{BlogPost, DateTime, Duration, Track};
 use anyhow::Context;
 use scraper::{Html, Selector};
 use serde_json as json;
-use std::path::PathBuf;
 use std::sync::LazyLock;
 
 pub(crate) const FEED_URL: &str = "https://daily.bandcamp.com/feed/";
@@ -75,7 +74,7 @@ pub(crate) struct TrackInfo {
     pub(crate) audio_url: std::collections::BTreeMap<String, String>,
 
     pub(crate) album_id: Option<u64>,
-    pub(crate) track_id: Option<u64>,
+    pub(crate) track_id: u64,
 }
 
 impl TrackInfo {
@@ -107,7 +106,7 @@ impl PlayerData {
                 artist: crate::types::Artist {
                     name: ti.artist.clone(),
                     bandcamp_id: if ti.artist == self.band_name {
-                        self.band_id.map(|id| id.to_string())
+                        self.band_id
                     } else {
                         None
                     },
@@ -120,24 +119,25 @@ impl PlayerData {
                 },
                 album_artist: crate::types::Artist {
                     name: self.band_name.clone(),
-                    bandcamp_id: self.band_id.map(|id| id.to_string()),
+                    bandcamp_id: self.band_id,
                     bandcamp_url: self.band_url.clone(),
                     spotify_id: None,
                 },
                 album: crate::types::Album {
                     title: self.title.clone(),
-                    bandcamp_id: ti.album_id.map(|id| id.to_string()),
+                    bandcamp_id: ti.album_id,
                     bandcamp_url: self.tralbum_url.clone(),
                     spotify_id: None,
                 },
                 duration: ti.audio_track_duration,
                 album_track_number: ti.track_number,
                 download_url: ti.download_url(),
-                bandcamp_id: ti.track_id.map(|id| id.to_string()),
+                bandcamp_id: ti.track_id,
                 spotify_id: None,
                 spotify_match_score: None,
                 spotify_playlist_id: None,
                 post_track_number: playlist_index,
+                filename: None,
             })
     }
 }
@@ -234,9 +234,7 @@ impl Scrape {
         } = meta;
 
         Ok(BlogPost {
-            dir: PathBuf::from(
-                format!("{} - {}", published.format("%Y-%m-%d"), title).replace('/', "_"),
-            ),
+            dir: BlogPost::derive_post_dir(&published, &title),
             url,
             title,
             description,

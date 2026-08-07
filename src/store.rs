@@ -2,14 +2,18 @@ use crate::bandcamp::Scrape;
 use crate::types::{Album, Artist, BlogPost, Duration, SpotifyPlaylist, Track};
 use anyhow::Context;
 use rusqlite::{named_params, Connection, OptionalExtension, Row, ToSql};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub(crate) const DEFAULT_DATA_DIR: &str = "./data";
 
 const DB_FILENAME: &str = "state.db";
 
-const MIGRATIONS: &[&str] = &[include_str!("migrations/001-init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/001-init.sql"),
+    include_str!("migrations/002-track-filenames.sql"),
+    include_str!("migrations/003-bandcamp-id-required.sql"),
+];
 
 const UPSERT_TRACK: &str = "
     INSERT INTO tracks (
@@ -78,7 +82,12 @@ const UPSERT_TRACK: &str = "
         album_title               = excluded.album_title,
         album_bandcamp_id         = excluded.album_bandcamp_id,
         album_bandcamp_url        = excluded.album_bandcamp_url,
-        album_spotify_id          = excluded.album_spotify_id";
+        album_spotify_id          = excluded.album_spotify_id,
+
+        -- preserve filename only if this row still holds the same track
+        filename = CASE
+            WHEN tracks.bandcamp_id = excluded.bandcamp_id THEN tracks.filename
+        END";
 
 const POST_COLUMNS: &str = "url, dir, title, description, published_at, modified_at";
 
@@ -92,7 +101,7 @@ impl TryFrom<&Row<'_>> for BlogPost {
             description: row.get("description")?,
             published: row.get("published_at")?,
             modified: row.get("modified_at")?,
-            dir: PathBuf::from(row.get::<_, String>("dir")?),
+            dir: row.get("dir")?,
             tracks: Vec::new(),
             spotify_playlist: None,
         })
@@ -124,6 +133,7 @@ impl TryFrom<&Row<'_>> for Track {
             spotify_id: row.get("spotify_id")?,
             spotify_match_score: row.get("spotify_match_score")?,
             spotify_playlist_id: row.get("spotify_playlist_id")?,
+            filename: row.get("filename")?,
             artist: Artist {
                 name: row.get("artist_name")?,
                 bandcamp_id: row.get("artist_bandcamp_id")?,
@@ -202,8 +212,105 @@ impl Store {
         Ok(Self { conn, root })
     }
 
+    pub(crate) fn path<T: AsRef<std::path::Path>>(&self, relative: T) -> PathBuf {
+        self.root.join(relative)
+    }
+
     pub(crate) fn post_dir(&self, post: &BlogPost) -> PathBuf {
-        self.root.join(&post.dir)
+        self.path(&post.dir)
+    }
+
+    pub(crate) fn track_path(&self, post: &BlogPost, track: &Track) -> Option<PathBuf> {
+        track
+            .filename
+            .as_ref()
+            .map(|filename| self.post_dir(post).join(filename))
+    }
+
+    pub(crate) fn is_downloaded(&self, post: &BlogPost, track: &Track) -> bool {
+        self.track_path(post, track)
+            .is_some_and(|path| path.is_file())
+    }
+
+    pub(crate) fn set_post_dir(&self, post_url: &str, dir: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE posts SET dir = :dir WHERE url = :url",
+            named_params! { ":dir": dir, ":url": post_url },
+        )?;
+
+        Ok(())
+    }
+
+    pub(crate) fn set_track_filename(
+        &self,
+        post_url: &str,
+        post_track_number: usize,
+        filename: &str,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE tracks SET filename = :filename
+              WHERE post_url = :post_url AND post_track_number = :post_track_number",
+            named_params! {
+                ":filename": filename,
+                ":post_url": post_url,
+                ":post_track_number": post_track_number,
+            },
+        )?;
+
+        Ok(())
+    }
+
+    pub(crate) fn rename_post_dir(&mut self, post: &mut BlogPost, to: &str) -> anyhow::Result<()> {
+        let from = self.post_dir(post);
+        let dest = self.path(to);
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE posts SET dir = :dir WHERE url = :url",
+            named_params! { ":dir": to, ":url": post.url },
+        )?;
+        std::fs::rename(&from, &dest).with_context(|| format!("renaming {from:?} to {dest:?}"))?;
+        tx.commit()?;
+
+        post.dir = to.to_string();
+
+        Ok(())
+    }
+
+    pub(crate) fn rename_track_file(
+        &mut self,
+        post: &BlogPost,
+        track: &mut Track,
+        to: &str,
+    ) -> anyhow::Result<()> {
+        let dir = self.post_dir(post);
+        let Some(current) = track.filename.as_ref() else {
+            anyhow::bail!(
+                "track {} of {} has no recorded file to move",
+                track.post_track_number,
+                post.url
+            );
+        };
+
+        let from = dir.join(current);
+        let dest = dir.join(to);
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE tracks SET filename = :filename
+              WHERE post_url = :post_url AND post_track_number = :post_track_number",
+            named_params! {
+                ":filename": to,
+                ":post_url": post.url,
+                ":post_track_number": track.post_track_number,
+            },
+        )?;
+        std::fs::rename(&from, &dest).with_context(|| format!("renaming {from:?} to {dest:?}"))?;
+        tx.commit()?;
+
+        track.filename = Some(to.to_string());
+
+        Ok(())
     }
 
     pub(crate) fn upsert_post(
@@ -211,11 +318,6 @@ impl Store {
         post: BlogPost,
         scrape: &Scrape,
     ) -> anyhow::Result<BlogPost> {
-        let dir = post
-            .dir
-            .to_str()
-            .with_context(|| format!("post directory {:?} is not utf-8", post.dir))?;
-
         let keep = post
             .tracks
             .iter()
@@ -248,7 +350,7 @@ impl Store {
                  modified_at  = excluded.modified_at",
             named_params! {
                 ":url": post.url,
-                ":dir": dir,
+                ":dir": post.dir,
                 ":title": post.title,
                 ":description": post.description,
                 ":published_at": post.published,
@@ -461,27 +563,16 @@ impl Store {
     }
 
     pub(crate) fn posts_with_incomplete_downloads(&self) -> anyhow::Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT p.dir, t.* FROM posts p JOIN tracks t ON t.post_url = p.url")?;
-
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>("post_url")?,
-                row.get::<_, String>("dir")?,
-                row.try_into()?,
-            ))
-        })?;
-
-        let mut missing = BTreeSet::new();
-        for row in rows {
-            let (url, dir, track): (String, String, Track) = row?;
-            if !self.root.join(dir).join(track.mp3_filename()).exists() {
-                missing.insert(url);
-            }
-        }
-
-        Ok(missing.into_iter().collect())
+        Ok(self
+            .list_posts()?
+            .into_iter()
+            .filter(|post| {
+                post.tracks
+                    .iter()
+                    .any(|track| !self.is_downloaded(post, track))
+            })
+            .map(|post| post.url)
+            .collect())
     }
 
     fn tracks(&self, post_url: &str) -> anyhow::Result<Vec<Track>> {
@@ -540,7 +631,7 @@ mod tests {
             description: format!("{title} description"),
             published,
             modified: published,
-            dir: PathBuf::from(title),
+            dir: title.to_string(),
             tracks,
             spotify_playlist: None,
         }

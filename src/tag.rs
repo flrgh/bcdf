@@ -1,12 +1,39 @@
 use crate::metrics;
-use crate::types::Track;
+use crate::store::Store;
+use crate::types::BlogPost;
 use id3::{frame::ExtendedText, Tag, TagLike, Version};
 use std::collections::HashMap;
-use std::path::Path;
+use std::fmt::Display;
 
-pub(crate) async fn tag(dir: &Path, tracks: &[Track]) -> anyhow::Result<()> {
-    for track in tracks {
-        let fname = dir.join(track.mp3_filename());
+trait TagValue {
+    fn tag_value(&self) -> Option<String>;
+}
+
+impl<T: Display> TagValue for Option<T> {
+    fn tag_value(&self) -> Option<String> {
+        self.as_ref().map(T::to_string)
+    }
+}
+
+impl TagValue for u64 {
+    fn tag_value(&self) -> Option<String> {
+        Some(self.to_string())
+    }
+}
+
+impl TagValue for usize {
+    fn tag_value(&self) -> Option<String> {
+        Some(self.to_string())
+    }
+}
+
+pub(crate) async fn tag(store: &Store, post: &BlogPost) -> anyhow::Result<()> {
+    for track in &post.tracks {
+        let Some(fname) = store.track_path(post, track) else {
+            tracing::debug!(?track, "SKIP: no recorded file");
+            continue;
+        };
+
         if !fname.exists() {
             tracing::debug!(?track, filename = ?fname, "SKIP: file does not exist");
             continue;
@@ -46,12 +73,12 @@ pub(crate) async fn tag(dir: &Path, tracks: &[Track]) -> anyhow::Result<()> {
                 .map(|et| (et.description.clone(), et.value.clone())),
         );
 
-        let mut set_tag = |t: &mut Tag, name: &str, value: &Option<String>| {
-            let Some(value) = value else {
+        let mut set_tag = |t: &mut Tag, name: &str, value: &dyn TagValue| {
+            let Some(value) = value.tag_value() else {
                 return;
             };
 
-            if ext.get(name).is_some_and(|v| *v == *value) {
+            if ext.get(name).is_some_and(|v| *v == value) {
                 return;
             }
 
@@ -59,7 +86,7 @@ pub(crate) async fn tag(dir: &Path, tracks: &[Track]) -> anyhow::Result<()> {
 
             t.add_frame(ExtendedText {
                 description: name.to_string(),
-                value: value.clone(),
+                value,
             });
         };
 
@@ -68,7 +95,7 @@ pub(crate) async fn tag(dir: &Path, tracks: &[Track]) -> anyhow::Result<()> {
         set_tag(
             &mut tag,
             "bandcamp_playlist_track_number",
-            &Some(track.post_track_number.to_string()),
+            &track.post_track_number,
         );
 
         set_tag(&mut tag, "bandcamp_artist_id", &track.artist.bandcamp_id);

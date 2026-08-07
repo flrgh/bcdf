@@ -1,5 +1,5 @@
-use crate::{download, tag};
-use anyhow::Context;
+use crate::store::Store;
+use crate::{download, rename, tag};
 use clap::Subcommand;
 
 /// Manage downloaded mp3 files
@@ -10,21 +10,19 @@ pub(crate) struct Cli {
 }
 
 impl Cli {
-    pub(crate) async fn exec(self, store: &crate::store::Store) -> anyhow::Result<()> {
+    pub(crate) async fn exec(self, store: &mut Store) -> anyhow::Result<()> {
         match self.command {
             Command::Download => {
-                for post in store.list_posts()? {
-                    let dir = store.post_dir(&post);
-                    std::fs::create_dir_all(&dir)
-                        .with_context(|| format!("creating post directory {dir:?}"))?;
-                    download::download(&dir, &post.tracks).await;
+                for mut post in store.list_posts()? {
+                    download::download(store, &mut post).await?;
                 }
             }
             Command::Tag => {
                 for post in store.list_posts()? {
-                    tag::tag(&store.post_dir(&post), &post.tracks).await?;
+                    tag::tag(store, &post).await?;
                 }
             }
+            Command::Rename { dry_run } => rename::rename(store, dry_run)?,
         };
 
         Ok(())
@@ -36,6 +34,14 @@ enum Command {
     /// Download any mp3 files missing from the data directory
     Download,
 
-    /// Rewrite the id3 tags of every downloaded mp3 file
+    /// Rewrite the id3 tags of every mp3 file recorded as downloaded
     Tag,
+
+    /// Rename post directories and mp3 files to match the current naming
+    /// scheme, updating the database to match
+    Rename {
+        /// Report what would be renamed without touching anything
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+    },
 }
