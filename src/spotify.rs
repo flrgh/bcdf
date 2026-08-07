@@ -214,7 +214,7 @@ impl Client {
 
         let id = id.to_string();
 
-        tracing::info!("setting spotify id to {}", id);
+        tracing::debug!("setting spotify id to {}", id);
         track.spotify_id = Some(id);
         track.spotify_match_score = Some(score);
 

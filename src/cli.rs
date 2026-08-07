@@ -13,6 +13,9 @@ pub(crate) struct Cli {
 
     #[command(flatten)]
     run: crate::run::Cli,
+
+    #[command(flatten)]
+    logger: crate::log::Logger,
 }
 
 impl Cli {
@@ -31,7 +34,9 @@ impl Cli {
 }
 
 pub(crate) async fn run() -> anyhow::Result<()> {
-    Cli::parse().exec().await
+    let cli = Cli::parse();
+    cli.logger.init();
+    cli.exec().await
 }
 
 #[derive(Subcommand, Debug)]

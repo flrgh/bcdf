@@ -3,6 +3,7 @@ mod cli;
 mod download;
 mod feed;
 mod http;
+mod log;
 mod metrics;
 mod mp3;
 mod rename;
@@ -16,6 +17,5 @@ mod util;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
     cli::run().await
 }
