@@ -18,12 +18,20 @@ pub(crate) struct BlogPost {
 }
 
 impl BlogPost {
-    pub(crate) fn derive_post_dir(published: &DateTime, title: &str) -> String {
-        format!("{} - {}", published.format("%Y-%m-%d"), title).replace('/', "_")
+    pub(crate) fn derive_post_dir(published: &DateTime, url: &str) -> String {
+        let path = url
+            .strip_suffix('/')
+            .unwrap_or(url)
+            .rsplit('/')
+            .next()
+            .expect("bandamp post url has at least one path component");
+
+        assert!(!path.is_empty(), "empty post slug for {url}");
+        format!("{}-{}", published.format("%Y-%m-%d"), path).replace('/', "_")
     }
 
     pub(crate) fn derive_dir(&self) -> String {
-        Self::derive_post_dir(&self.published, &self.title)
+        Self::derive_post_dir(&self.published, &self.url)
     }
 
     pub(crate) fn has_spotify_tracks(&self) -> bool {

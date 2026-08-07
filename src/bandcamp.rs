@@ -234,7 +234,7 @@ impl Scrape {
         } = meta;
 
         Ok(BlogPost {
-            dir: BlogPost::derive_post_dir(&published, &title),
+            dir: BlogPost::derive_post_dir(&published, &url),
             url,
             title,
             description,
