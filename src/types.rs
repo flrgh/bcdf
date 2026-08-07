@@ -161,8 +161,11 @@ impl Track {
 
 impl Track {
     pub(crate) fn derive_filename(&self) -> String {
-        let title = self.title.replace('/', "_");
-        let artist = self.artist.name.replace('/', "_");
-        format!("{:02} - {} - {}.mp3", self.post_track_number, artist, title)
+        format!(
+            "{:02} - {} - {}.mp3",
+            self.post_track_number, self.artist.name, self.title
+        )
+        .replace('/', "_")
+        .replace('\n', "_")
     }
 }
