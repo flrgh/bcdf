@@ -11,23 +11,29 @@ consuming music from the Bandcamp Daily blog. It scans the blog's RSS feed for
 posts and creates Spotify playlists for them. It can also download the songs 
 straight from Bandcamp for listening in a local media player.
 
-
 ```
 $ bcdf --help
-Usage: bcdf [OPTIONS] [COMMAND]
+Follow the Bandcamp Daily blog: scrape posts, download mp3s, and build Spotify playlists
+
+Usage: bcdf [OPTIONS] <COMMAND>
 
 Commands:
-  mp3   Manage downloaded mp3 files
-  help  Print this message or the help of the given subcommand(s)
+  scan      Scrape new posts, download their mp3s, and update Spotify playlists
+  mp3       Manage downloaded mp3 files
+  post      View/manage bandcamp blog posts
+  track     View and manage tracks
+  playlist  View and manage Spotify playlists
+  spotify   Spotify management and debug actions
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
-      --data-dir <DIR>  Base directory for storing state and downloaded mp3 files [default: ./data]
-      --no-download     Don't download anything
-      --no-spotify      Don't create Spotify playlists
-      --url <URL>       Scan only a single url
-      --rescan          Re-scan from the filesystem only
-  -h, --help            Print help
-  -V, --version         Print version
+      --data-dir <DIR>     Base directory for storing state and downloaded mp3 files [default: ./data]
+  -v, --verbose...         Increase log verbosity: -v for debug, -vv for trace
+      --log-level <LEVEL>  Log level
+      --color <WHEN>       When to colorize log output [default: auto] [possible values: auto, always, never]
+  -h, --help               Print help
+  -V, --version            Print version
+
 ```
 
 ## status

@@ -1,8 +1,9 @@
 use crate::{bandcamp, download, feed, http, metrics, spotify, tag};
 use anyhow::Context;
 
+/// Scrape new posts, download their mp3s, and update Spotify playlists
 #[derive(clap::Args, Debug, PartialEq)]
-#[group(id = "run")]
+#[group(id = "scan")]
 pub(crate) struct Cli {
     /// Don't download anything
     #[arg(long, global = true, default_value_t = false)]

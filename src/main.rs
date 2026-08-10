@@ -11,7 +11,7 @@ mod playlist;
 mod post;
 mod query;
 mod rename;
-mod run;
+mod scan;
 mod search;
 mod spotify;
 mod store;
@@ -22,5 +22,6 @@ mod util;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    cli::run().await
+    let cli = cli::Cli::new();
+    cli.exec().await
 }
