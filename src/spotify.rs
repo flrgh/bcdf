@@ -338,7 +338,7 @@ pub(crate) struct Cli {
 impl Cli {
     pub(crate) async fn exec(self, _store: &Store) -> anyhow::Result<()> {
         match self.command {
-            Command::GetTrack { id } => {
+            Command::Track { id } => {
                 let client = connect().await?;
 
                 match client.spotify.track(id, Some(MARKET)).await {
@@ -349,6 +349,20 @@ impl Cli {
                     }
                     Err(e) => anyhow::bail!(e),
                 }
+            }
+
+            Command::Playlist { query } => {
+                let client = connect().await?;
+                let playlist = match query {
+                    PlaylistQuery::Id(playlist_id) => {
+                        client.spotify.playlist(playlist_id, None, Some(MARKET))
+                    }
+                }
+                .await?;
+
+                let mut out = std::io::stdout().lock();
+                serde_json::to_writer_pretty(&mut out, &serde_json::json!(playlist))?;
+                println!()
             }
 
             Command::Search { title, artist } => {
@@ -368,14 +382,35 @@ fn track_id(input: &str) -> anyhow::Result<TrackId<'static>> {
     Ok(id.into_static())
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum PlaylistQuery {
+    Id(PlaylistId<'static>),
+}
+
+impl std::str::FromStr for PlaylistQuery {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let id = PlaylistId::from_id_or_uri(s)?;
+        Ok(Self::Id(id.into_static()))
+    }
+}
+
 #[derive(clap::Subcommand, Debug)]
 enum Command {
     /// Fetch and print a Spotify track by its ID
-    GetTrack {
+    Track {
         #[arg(value_name = "TRACK_ID", value_parser = track_id)]
         id: TrackId<'static>,
     },
 
+    /// Fetch and print a Spotify playlist by its ID
+    Playlist {
+        #[arg(value_name = "ID_OR_NAME")]
+        query: PlaylistQuery,
+    },
+
+    /// Search a track on Spotify and print the results
     Search {
         #[arg(value_name = "TRACK_TITLE")]
         title: String,
