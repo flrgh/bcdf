@@ -43,9 +43,20 @@ impl BlogPost {
             .iter()
             .any(|t| t.spotify_id.is_some() && t.spotify_playlist_id.is_none())
     }
+
+    pub(crate) fn downloaded_count(&self) -> usize {
+        self.tracks.iter().filter(|t| t.filename.is_some()).count()
+    }
+
+    pub(crate) fn spotify_count(&self) -> usize {
+        self.tracks
+            .iter()
+            .filter(|t| t.spotify_id.is_some())
+            .count()
+    }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize)]
 pub(crate) struct SpotifyPlaylist {
     pub(crate) id: String,
 
@@ -56,7 +67,7 @@ pub(crate) struct SpotifyPlaylist {
     pub(crate) name: String,
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize)]
 pub(crate) struct Artist {
     pub(crate) name: String,
     pub(crate) bandcamp_id: Option<u64>,
@@ -86,7 +97,7 @@ where
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, serde::Serialize)]
 pub(crate) struct Album {
     pub(crate) title: String,
     pub(crate) bandcamp_id: Option<u64>,
@@ -168,4 +179,11 @@ impl Track {
         .replace('/', "_")
         .replace('\n', "_")
     }
+}
+
+/// Rendering mode for the browse commands
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Format {
+    Table,
+    Json,
 }

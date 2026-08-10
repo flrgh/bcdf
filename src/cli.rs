@@ -29,6 +29,9 @@ impl Cli {
         match self.resolved_command() {
             Command::Run => self.run.exec(&mut store).await,
             Command::Mp3(mp3) => mp3.exec(&mut store).await,
+            Command::Post(post) => post.exec(&store),
+            Command::Track(track) => track.exec(&store),
+            Command::Playlist(playlist) => playlist.exec(&store),
         }
     }
 }
@@ -45,6 +48,12 @@ enum Command {
     Run,
 
     Mp3(crate::mp3::Cli),
+
+    Post(crate::post::Cli),
+
+    Track(crate::track::Cli),
+
+    Playlist(crate::playlist::Cli),
 }
 
 #[cfg(test)]
