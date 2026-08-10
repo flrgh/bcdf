@@ -126,9 +126,12 @@ impl Client {
     async fn do_search(
         &self,
         track_title: &str,
-        artist: &str,
+        artist: Option<&str>,
     ) -> anyhow::Result<Vec<rspotify::model::FullTrack>> {
-        let query = format!("track:{} artist:{}", track_title, artist);
+        let query = match artist {
+            Some(artist) => format!("track:{track_title} artist:{artist}"),
+            None => format!("track:{track_title}"),
+        };
 
         metrics::inc(metrics::SpotifyTrackSearchQueries, 1);
 
@@ -146,8 +149,7 @@ impl Client {
             .with_context(|| format!("searching track: {}", track_title))?;
 
         let SearchResult::Tracks(tracks) = result else {
-            tracing::warn!(?track_title, "unexpected track search results");
-            return Ok(Vec::new());
+            anyhow::bail!("unexpected track search results");
         };
 
         tracing::debug!(
@@ -166,12 +168,14 @@ impl Client {
         }
 
         let results = {
-            let mut results = self.do_search(&track.title, &track.artist.name).await?;
+            let mut results = self
+                .do_search(&track.title, Some(&track.artist.name))
+                .await?;
 
             if results.len() < 5 && track.artist.name != track.album_artist.name {
                 // also search by album artist if we didn't get enough results
                 results.extend(
-                    self.do_search(&track.title, &track.album_artist.name)
+                    self.do_search(&track.title, Some(&track.album_artist.name))
                         .await?,
                 );
             }
@@ -322,4 +326,61 @@ impl Client {
 
         Ok(())
     }
+}
+
+/// Spotify management and debug actions
+#[derive(clap::Args, Debug)]
+pub(crate) struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+impl Cli {
+    pub(crate) async fn exec(self, _store: &Store) -> anyhow::Result<()> {
+        match self.command {
+            Command::GetTrack { id } => {
+                let client = connect().await?;
+
+                match client.spotify.track(id, Some(MARKET)).await {
+                    Ok(track) => {
+                        let mut out = std::io::stdout().lock();
+                        serde_json::to_writer_pretty(&mut out, &serde_json::json!(track))?;
+                        println!()
+                    }
+                    Err(e) => anyhow::bail!(e),
+                }
+            }
+
+            Command::Search { title, artist } => {
+                let client = connect().await?;
+                let tracks = client.do_search(&title, artist.as_deref()).await?;
+                let mut out = std::io::stdout().lock();
+                serde_json::to_writer_pretty(&mut out, &serde_json::json!(tracks))?;
+                println!()
+            }
+        };
+        Ok(())
+    }
+}
+
+fn track_id(input: &str) -> anyhow::Result<TrackId<'static>> {
+    let id = TrackId::from_id_or_uri(input)?;
+    Ok(id.into_static())
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Fetch and print a Spotify track by its ID
+    GetTrack {
+        #[arg(value_name = "TRACK_ID", value_parser = track_id)]
+        id: TrackId<'static>,
+    },
+
+    Search {
+        #[arg(value_name = "TRACK_TITLE")]
+        title: String,
+
+        #[arg(long, global = true, value_name = "ARTIST")]
+        artist: Option<String>,
+    },
 }

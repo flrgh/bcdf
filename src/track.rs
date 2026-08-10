@@ -16,10 +16,11 @@ pub(crate) struct Cli {
 }
 
 impl Cli {
-    pub(crate) fn exec(self, store: &Store) -> anyhow::Result<()> {
+    pub(crate) async fn exec(self, store: &Store) -> anyhow::Result<()> {
         match self.command {
             Command::Ls(ls) => ls.exec(store),
             Command::Show(show) => show.exec(store),
+            Command::Match(match_) => match_.exec(store).await,
         }
     }
 }
@@ -31,6 +32,9 @@ enum Command {
 
     /// Show a single track
     Show(Show),
+
+    /// Attempt to match (or re-match with -f|--force) a Bandcamp track to a Spotify track
+    Match(Match),
 }
 
 #[derive(clap::Args, Debug)]
@@ -140,6 +144,105 @@ impl Show {
                 writeln!(out)?;
             }
         };
+
+        Ok(())
+    }
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct Match {
+    /// Select the track matching this text, or <post>/<number>
+    #[arg(value_name = "QUERY")]
+    query: TrackQuery,
+
+    #[arg(short, long, default_value_t = false)]
+    force: bool,
+
+    #[arg(short = 'n', long, default_value_t = false)]
+    dry_run: bool,
+}
+
+impl Match {
+    async fn exec(self, store: &Store) -> anyhow::Result<()> {
+        let posts = store.list_posts()?;
+        let row = self.query.filter_unique(&posts)?;
+
+        fn fmt_score(s: &Option<f64>) -> String {
+            match s {
+                Some(v) => v.to_string(),
+                None => "unknown".to_string(),
+            }
+        }
+
+        let old_id = &row.track.spotify_id;
+        let old_score = &row.track.spotify_match_score;
+        if let (Some(id), false) = (old_id, self.force) {
+            println!(
+                "unchanged: already matched ('{} - {}' => {}, score: {})",
+                row.track.artist.name,
+                row.track.title,
+                id,
+                fmt_score(old_score)
+            );
+            return Ok(());
+        };
+
+        let spotify = crate::spotify::connect().await?;
+        let mut track = row.track.clone();
+        track.spotify_id = None;
+        track.spotify_match_score = None;
+        spotify.search(&mut track).await?;
+
+        let update = match (old_id, &track.spotify_id) {
+            (Some(old), Some(new)) => {
+                let new_score = &track.spotify_match_score;
+
+                if old == new {
+                    dbg!(&old_score, &new_score);
+                    println!("unchanged: {old} is still the best spotify track match");
+                    if old_score != new_score {
+                        println!(
+                            "match score will be updated from {} -> {}",
+                            fmt_score(old_score),
+                            fmt_score(new_score)
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    println!(
+                        "changed: {old} (score: {}) => {new} (score: {})",
+                        fmt_score(old_score),
+                        fmt_score(new_score)
+                    );
+                    true
+                }
+            }
+            (None, None) => {
+                println!("no new spotify match found :(");
+                false
+            }
+            (None, Some(new)) => {
+                println!(
+                    "new match: {new} (score: {})",
+                    fmt_score(&track.spotify_match_score)
+                );
+                true
+            }
+            (Some(old), None) => {
+                println!("changed: {old} (score: {}) will be removed. This might mean the track no longer exists on Spotify or that updated search criteria determined it to no longer be a suitable match", fmt_score(old_score));
+                true
+            }
+        };
+
+        if update {
+            if self.dry_run {
+                println!("dry run: no database changes made");
+            } else {
+                store.update_track_spotify(&row.post.url, &track)?;
+            }
+        }
 
         Ok(())
     }

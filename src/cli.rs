@@ -30,8 +30,9 @@ impl Cli {
             Command::Run => self.run.exec(&mut store).await,
             Command::Mp3(mp3) => mp3.exec(&mut store).await,
             Command::Post(post) => post.exec(&store),
-            Command::Track(track) => track.exec(&store),
+            Command::Track(track) => track.exec(&store).await,
             Command::Playlist(playlist) => playlist.exec(&store),
+            Command::Spotify(spotify) => spotify.exec(&store).await,
         }
     }
 }
@@ -54,6 +55,8 @@ enum Command {
     Track(crate::track::Cli),
 
     Playlist(crate::playlist::Cli),
+
+    Spotify(crate::spotify::Cli),
 }
 
 #[cfg(test)]
