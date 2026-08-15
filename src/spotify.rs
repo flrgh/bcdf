@@ -7,7 +7,7 @@ use rspotify::prelude::*;
 use rspotify::{AuthCodeSpotify, Credentials};
 
 use crate::metrics;
-use crate::search::TrackMatcher;
+use crate::search::{Artists, Score, Title, TrackMatcher};
 use crate::store::Store;
 use crate::types::{self, BlogPost, SpotifyPlaylist};
 
@@ -152,77 +152,136 @@ impl Client {
             anyhow::bail!("unexpected track search results");
         };
 
+        // the query verbatim, because that is what you paste at the API to
+        // reproduce a bad result
         tracing::debug!(
-            track = track_title,
-            artist = artist,
+            query = %query,
             results = tracks.items.len(),
-            "search results",
+            "spotify search",
         );
 
         Ok(tracks.items)
     }
 
+    /// Queries to try in order, stopping at the first that yields a candidate the
+    /// matcher accepts. Spotify indexes a track under its bare title, so the
+    /// credits bandcamp packs into the title have to come out before asking.
+    fn query_attempts(track: &types::Track) -> Vec<(String, Option<String>)> {
+        let title = Title::parse(&track.title);
+        let artists = Artists::parse(&track.artist.name);
+        let album_artists = Artists::parse(&track.album_artist.name);
+
+        let mut attempts = Vec::new();
+
+        if artists.is_various() {
+            if let Some((artist, core)) = title.credited_artist() {
+                attempts.push((core, Some(artist)));
+            }
+        }
+
+        attempts.push((title.core().to_string(), Some(artists.lead().to_string())));
+        attempts.push((
+            title.core().to_string(),
+            Some(album_artists.lead().to_string()),
+        ));
+        attempts.push((track.title.clone(), Some(artists.lead().to_string())));
+        attempts.push((title.core().to_string(), None));
+
+        let mut seen = std::collections::HashSet::new();
+        attempts.retain(|attempt| seen.insert(attempt.clone()));
+
+        attempts
+    }
+
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            track = %track.title,
+            artist = %track.artist.name,
+            album = %track.album.title,
+            secs = track.duration.as_secs_f64(),
+        )
+    )]
     pub(crate) async fn search(&self, track: &mut types::Track) -> anyhow::Result<()> {
         if track.spotify_id.is_some() {
             return Ok(());
         }
 
-        let results = {
-            let mut results = self
-                .do_search(&track.title, Some(&track.artist.name))
-                .await?;
+        let mut tm = TrackMatcher::new(track)?;
+        let mut seen = 0usize;
+        let mut nearest: Option<Score> = None;
+        let attempts = Self::query_attempts(track);
 
-            if results.len() < 5 && track.artist.name != track.album_artist.name {
-                // also search by album artist if we didn't get enough results
-                results.extend(
-                    self.do_search(&track.title, Some(&track.album_artist.name))
-                        .await?,
-                );
+        tracing::debug!(attempts = attempts.len(), "planned queries");
+
+        for (attempt, (title, artist)) in attempts.into_iter().enumerate() {
+            let results = self.do_search(&title, artist.as_deref()).await?;
+            seen += results.len();
+
+            // scoring is synchronous, so entering the span here cannot leak into
+            // another task the way holding one across an await would
+            let span = tracing::debug_span!("attempt", n = attempt, results = results.len());
+            let _guard = span.enter();
+
+            let mut matched = Vec::new();
+
+            for result in &results {
+                let score = tm.score(result);
+
+                if let Some(score) = score.matched() {
+                    matched.push((score, result));
+                    continue;
+                }
+
+                let closer = match &nearest {
+                    Some(current) => score.proximity() > current.proximity(),
+                    None => true,
+                };
+
+                if closer {
+                    nearest = Some(score);
+                }
             }
 
-            results
-        };
+            let best = matched
+                .into_iter()
+                .max_by(|(score_a, _), (score_b, _)| score_a.total_cmp(score_b));
 
-        if results.is_empty() {
+            let Some((score, best)) = best else {
+                tracing::debug!(candidates = results.len(), "no candidate passed the gates");
+                continue;
+            };
+
+            let Some(ref id) = best.id else {
+                anyhow::bail!("Track: {best:?} does not have an ID");
+            };
+
+            let id = id.to_string();
+
+            tracing::info!(
+                id = %id,
+                name = %best.name,
+                artist = %best.artists[0].name,
+                album = %best.album.name,
+                number = best.track_number,
+                secs = best.duration.num_milliseconds() as f64 / 1000.0,
+                score = %format_args!("{score:.1}"),
+                attempt,
+                "matched",
+            );
+
+            track.spotify_id = Some(id);
+            track.spotify_match_score = Some(score);
+
+            metrics::inc(metrics::TracksDiscoveredOnSpotify, 1);
+
             return Ok(());
         }
 
-        let mut tm = TrackMatcher::new(track)?;
-
-        let best = results
-            .iter()
-            .filter_map(|result| Some((tm.score(result)?, result)))
-            .max_by(|(score_a, _), (score_b, _)| score_a.total_cmp(score_b));
-
-        let Some((score, best)) = best else {
-            tracing::info!(
-                "no match for track('{}') out of {} results from Spotify",
-                track.title,
-                results.len()
-            );
-            return Ok(());
-        };
-
-        tracing::info!(
-            "Result track: {}, artist: {}, album: {}, # {}, score: {}",
-            best.name,
-            best.artists[0].name,
-            best.album.name,
-            best.track_number,
-            score
-        );
-
-        let Some(ref id) = best.id else {
-            anyhow::bail!("Track: {best:?} does not have an ID");
-        };
-
-        let id = id.to_string();
-
-        tracing::debug!("setting spotify id to {}", id);
-        track.spotify_id = Some(id);
-        track.spotify_match_score = Some(score);
-
-        metrics::inc(metrics::TracksDiscoveredOnSpotify, 1);
+        match nearest {
+            Some(nearest) => tracing::info!(results = seen, closest = %nearest, "no match"),
+            None => tracing::info!(results = seen, "no match: Spotify returned nothing"),
+        }
 
         Ok(())
     }
@@ -232,7 +291,12 @@ impl Client {
 
         for track in post.tracks.iter_mut() {
             if let Err(e) = self.search(track).await.context("searching track") {
-                tracing::error!(?track, error = ?e, "failed to search track");
+                tracing::error!(
+                    track = %track.title,
+                    artist = %track.artist.name,
+                    error = ?e,
+                    "failed to search track",
+                );
                 metrics::inc(metrics::SpotifyErrors, 1);
             };
 

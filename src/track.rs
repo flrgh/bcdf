@@ -1,12 +1,14 @@
-use crate::list::Filters;
-use crate::query::{normalize, Matchable, TrackQuery, DATE_FORMAT};
+use crate::list::ColumnSpec::{Num, Pin, Plain};
+use crate::list::{self, ColumnSpec, Filters};
+use crate::query::{normalize, Matchable, TrackQuery};
 use crate::store::Store;
-use crate::types::{BlogPost, Format, Track};
+use crate::types::{BlogPost, BlogPostRow, Format, Track};
 use clap::Subcommand;
+use comfy_table::{Cell, Table};
 use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::io::{self, Write};
+use std::io::Write;
 
 /// View and manage tracks
 #[derive(clap::Args, Debug)]
@@ -66,7 +68,7 @@ impl List {
             None => TrackRow::all(&posts),
         };
 
-        rows.retain(|row| self.filters.published_at(&row.post.published));
+        rows.retain(|row| self.filters.published_at(&row.post().published));
 
         rows.sort_by(|a, b| {
             if self.reverse {
@@ -82,11 +84,17 @@ impl List {
 
         match self.output {
             Format::Table => {
-                writeln!(out, "POST\t{CHILD_HEADER}")?;
+                let mut header = CHILD_HEADER;
+                header[0] = ("Track", Pin);
+
+                let mut table = list::table(header);
                 for row in rows {
-                    write!(out, "{}\t", row.post.dir)?;
-                    row.write_child_row(&mut out)?;
+                    let mut cells = row.child_cells();
+                    cells[0] = Cell::new(row.locator());
+                    table.add_row(cells);
                 }
+
+                writeln!(out, "{table}")?;
             }
             Format::Json => {
                 let values: Vec<Value> = rows.iter().map(|row| row.json()).collect();
@@ -119,25 +127,33 @@ impl Show {
             Format::Table => {
                 let track = row.track;
 
-                writeln!(out, "post\t{}", row.post.dir)?;
-                writeln!(out, "number\t{}", track.post_track_number)?;
-                writeln!(out, "title\t{}", track.title)?;
-                writeln!(out, "artist\t{}", track.artist.name)?;
-                writeln!(out, "album_artist\t{}", track.album_artist.name)?;
-                writeln!(out, "album\t{}", track.album.title)?;
-
                 let secs = track.duration.as_secs();
-                writeln!(out, "duration\t{}:{:02}", secs / 60, secs % 60)?;
+                let locator = row.locator();
+                let number = track.post_track_number.to_string();
+                let duration = format!("{}:{:02}", secs / 60, secs % 60);
+                let bandcamp_id = track.bandcamp_id.to_string();
 
-                writeln!(out, "bandcamp_id\t{}", track.bandcamp_id)?;
-                writeln!(out, "spotify_id\t{}", opt_string(&track.spotify_id))?;
-                writeln!(
-                    out,
-                    "spotify_playlist_id\t{}",
-                    opt_string(&track.spotify_playlist_id)
-                )?;
-                writeln!(out, "file\t{}", opt_string(&track.filename))?;
-                writeln!(out, "download_url\t{}", opt_string(&track.download_url))?;
+                let mut table = list::detail_table();
+                table.add_rows([
+                    ["locator", locator.as_str()],
+                    ["post", row.post().dir.as_str()],
+                    ["number", number.as_str()],
+                    ["title", track.title.as_str()],
+                    ["artist", track.artist.name.as_str()],
+                    ["album_artist", track.album_artist.name.as_str()],
+                    ["album", track.album.title.as_str()],
+                    ["duration", duration.as_str()],
+                    ["bandcamp_id", bandcamp_id.as_str()],
+                    ["spotify_id", list::short_id(opt_string(&track.spotify_id))],
+                    [
+                        "spotify_playlist_id",
+                        list::short_id(opt_string(&track.spotify_playlist_id)),
+                    ],
+                    ["file", opt_string(&track.filename)],
+                    ["download_url", opt_string(&track.download_url)],
+                ]);
+
+                writeln!(out, "{table}")?;
             }
             Format::Json => {
                 serde_json::to_writer_pretty(&mut out, &row.json())?;
@@ -240,7 +256,7 @@ impl Match {
             if self.dry_run {
                 println!("dry run: no database changes made");
             } else {
-                store.update_track_spotify(&row.post.url, &track)?;
+                store.update_track_spotify(&row.post().url, &track)?;
             }
         }
 
@@ -263,52 +279,85 @@ enum Sort {
 impl Sort {
     fn compare(self, a: &TrackRow, b: &TrackRow) -> Ordering {
         let by_field = match self {
-            Self::Post => b.post.published.cmp(&a.post.published),
+            Self::Post => b.post().published.cmp(&a.post().published),
             Self::Title => normalize(&a.track.title).cmp(&normalize(&b.track.title)),
             Self::Artist => normalize(&a.track.artist.name).cmp(&normalize(&b.track.artist.name)),
             Self::Album => normalize(&a.track.album.title).cmp(&normalize(&b.track.album.title)),
         };
 
         by_field
-            .then_with(|| a.post.dir.cmp(&b.post.dir))
+            .then_with(|| a.post.locator.cmp(&b.post.locator))
             .then_with(|| a.track.post_track_number.cmp(&b.track.post_track_number))
     }
 }
 
-pub(crate) const CHILD_HEADER: &str = "#\tARTIST\tALBUM\tDUR\tDL\tSPOTIFY\tTITLE";
+const CHILD_HEADER: [(&str, ColumnSpec); 7] = [
+    ("#", Num),
+    ("Title", Plain),
+    ("Artist", Plain),
+    ("Album", Plain),
+    ("Dur", Plain),
+    ("Dl", Plain),
+    ("Spotify", Pin),
+];
 
-/// A Track plus its parent BlogPost
+pub(crate) fn child_table<'a>(
+    post: &'a BlogPostRow,
+    tracks: impl IntoIterator<Item = &'a Track>,
+) -> Table {
+    let mut table = list::table(CHILD_HEADER);
+    for track in tracks {
+        table.add_row(TrackRow::new(post, track).child_cells());
+    }
+    table
+}
+
+impl BlogPostRow {
+    pub(crate) fn track_rows(&self) -> impl Iterator<Item = TrackRow<'_>> {
+        self.post
+            .tracks
+            .iter()
+            .map(move |track| TrackRow::new(self, track))
+    }
+}
+
+/// A Track plus the post row it belongs to
 #[derive(Clone, Copy)]
 pub(crate) struct TrackRow<'a> {
-    post: &'a BlogPost,
+    post: &'a BlogPostRow,
     track: &'a Track,
 }
 
 impl<'a> TrackRow<'a> {
-    pub(crate) fn new(post: &'a BlogPost, track: &'a Track) -> Self {
+    pub(crate) fn new(post: &'a BlogPostRow, track: &'a Track) -> Self {
         Self { post, track }
     }
 
-    pub(crate) fn all(posts: &'a [BlogPost]) -> Vec<Self> {
-        posts
-            .iter()
-            .flat_map(|post| post.tracks.iter().map(move |track| Self::new(post, track)))
-            .collect()
+    pub(crate) fn all(posts: &'a [BlogPostRow]) -> Vec<Self> {
+        posts.iter().flat_map(BlogPostRow::track_rows).collect()
     }
 
-    pub(crate) fn write_child_row(&self, out: &mut dyn Write) -> io::Result<()> {
+    pub(crate) fn post(&self) -> &'a BlogPost {
+        &self.post.post
+    }
+
+    pub(crate) fn locator(&self) -> String {
+        format!("{}.{:02}", self.post.locator, self.track.post_track_number)
+    }
+
+    pub(crate) fn child_cells(&self) -> Vec<Cell> {
         let track = self.track;
-
-        write!(out, "{}\t", track.post_track_number)?;
-        write!(out, "{}\t", track.artist.name)?;
-        write!(out, "{}\t", track.album.title)?;
-
         let secs = track.duration.as_secs();
-        write!(out, "{}:{:02}\t", secs / 60, secs % 60)?;
 
-        write!(out, "{}\t", if track.filename.is_some() { "y" } else { "" })?;
-        write!(out, "{}\t", track.spotify_id.as_deref().unwrap_or_default())?;
-        writeln!(out, "{}", track.title)
+        vec![
+            Cell::new(track.post_track_number),
+            Cell::new(&track.title),
+            Cell::new(&track.artist.name),
+            Cell::new(&track.album.title),
+            Cell::new(format!("{}:{:02}", secs / 60, secs % 60)),
+            Cell::new(if track.filename.is_some() { "y" } else { "" }),
+            Cell::new(list::short_id(opt_string(&track.spotify_id))),
+        ]
     }
 
     pub(crate) fn child_json(&self) -> Value {
@@ -333,7 +382,7 @@ impl<'a> TrackRow<'a> {
             // rather than what is on disk
             "file": track.filename.as_ref().map(|name| json!({
                 "name": name,
-                "path": format!("{}/{}", self.post.dir, name),
+                "path": format!("{}/{}", self.post().dir, name),
             })),
         })
     }
@@ -354,15 +403,15 @@ impl Matchable for TrackRow<'_> {
         let track = self.track;
 
         let mut fields = vec![
+            Cow::from(self.locator()),
             Cow::from(track.title.as_str()),
             Cow::from(track.artist.name.as_str()),
             Cow::from(track.album_artist.name.as_str()),
             Cow::from(track.album.title.as_str()),
             Cow::from(track.bandcamp_id.to_string()),
-            Cow::from(self.post.dir.as_str()),
-            Cow::from(self.post.url.as_str()),
-            Cow::from(self.post.title.as_str()),
-            Cow::from(self.post.published.format(DATE_FORMAT).to_string()),
+            Cow::from(self.post().dir.as_str()),
+            Cow::from(self.post().url.as_str()),
+            Cow::from(self.post().title.as_str()),
         ];
 
         let optional = [
@@ -379,7 +428,10 @@ impl Matchable for TrackRow<'_> {
     }
 
     fn identity_fields(&self) -> Vec<Cow<'_, str>> {
-        let mut fields = vec![Cow::from(self.track.bandcamp_id.to_string())];
+        let mut fields = vec![
+            Cow::from(self.locator()),
+            Cow::from(self.track.bandcamp_id.to_string()),
+        ];
 
         if let Some(spotify_id) = &self.track.spotify_id {
             fields.push(Cow::from(spotify_id.as_str()));

@@ -1,10 +1,12 @@
-use crate::list::Filters;
-use crate::query::{normalize, Matchable, Query, DATE_FORMAT};
+use crate::list::ColumnSpec::{Num, Pin, Plain};
+use crate::list::{self, Filters};
+use crate::query::{normalize, Matchable, Query};
 use crate::store::Store;
-use crate::track::{self, TrackRow};
-use crate::types::{BlogPost, Format};
+use crate::track;
+use crate::types::{BlogPostRow, Format};
 use chrono::SecondsFormat;
 use clap::Subcommand;
+use comfy_table::Cell;
 use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -51,13 +53,13 @@ impl List {
         let posts = store
             .list_posts()?
             .into_iter()
-            .filter(|post| self.filters.published_at(&post.published))
-            .filter(|post| match &self.query {
-                Some(query) => query.matches(post),
+            .filter(|row| self.filters.published_at(&row.post.published))
+            .filter(|row| match &self.query {
+                Some(query) => query.matches(row),
                 None => true,
             });
 
-        let mut posts: Vec<BlogPost> = posts.collect();
+        let mut posts: Vec<BlogPostRow> = posts.collect();
 
         posts.sort_by(|a, b| {
             if self.reverse {
@@ -73,30 +75,41 @@ impl List {
 
         match self.output {
             Format::Table => {
-                writeln!(out, "DIR\tTRACKS\tDOWNLOADED\tSPOTIFY\tPLAYLIST\tTITLE")?;
-                for post in posts.into_iter() {
-                    write!(out, "{}\t", post.dir)?;
-                    write!(out, "{}\t", post.tracks.len())?;
-                    write!(out, "{}\t", post.downloaded_count())?;
-                    write!(out, "{}\t", post.spotify_count())?;
-                    write!(
-                        out,
-                        "{}\t",
-                        post.spotify_playlist
-                            .as_ref()
-                            .map(|p| p.id.clone())
-                            .unwrap_or_default(),
-                    )?;
-                    write!(out, "{}", post.title)?;
+                let mut table = list::table([
+                    ("Post", Pin),
+                    ("Tracks", Num),
+                    ("Dl", Num),
+                    ("Sp", Num),
+                    ("Playlist", Pin),
+                    ("Title", Plain),
+                ]);
 
-                    writeln!(out)?;
+                for row in posts.iter() {
+                    let post = &row.post;
+                    table.add_row(vec![
+                        Cell::new(&row.locator),
+                        Cell::new(post.tracks.len()),
+                        Cell::new(post.downloaded_count()),
+                        Cell::new(post.spotify_count()),
+                        Cell::new(
+                            post.spotify_playlist
+                                .as_ref()
+                                .map(|p| list::short_id(&p.id))
+                                .unwrap_or_default(),
+                        ),
+                        Cell::new(&post.title),
+                    ]);
                 }
+
+                writeln!(out, "{table}")?;
             }
             Format::Json => {
                 let values: Vec<Value> = posts
                     .iter()
-                    .map(|post| {
+                    .map(|row| {
+                        let post = &row.post;
                         json!({
+                            "locator": row.locator,
                             "dir": post.dir,
                             "url": post.url,
                             "title": post.title,
@@ -132,7 +145,8 @@ pub(crate) struct Show {
 impl Show {
     fn exec(self, store: &Store) -> anyhow::Result<()> {
         let posts = store.list_posts()?;
-        let post = self.query.filter_unique(&posts)?;
+        let row = self.query.filter_unique(&posts)?;
+        let post = &row.post;
 
         let mut out = std::io::stdout().lock();
         match self.output {
@@ -140,43 +154,44 @@ impl Show {
                 let published = post.published.to_rfc3339_opts(SecondsFormat::Secs, true);
                 let modified = post.modified.to_rfc3339_opts(SecondsFormat::Secs, true);
 
-                writeln!(out, "url\t{}", post.url)?;
-                writeln!(out, "title\t{}", post.title)?;
-                writeln!(out, "published\t{published}")?;
-                writeln!(out, "modified\t{modified}")?;
-                writeln!(out, "dir\t{}", post.dir)?;
-                writeln!(
-                    out,
-                    "tracks\t{} ({} downloaded, {} on spotify)",
+                let tracks = format!(
+                    "{} ({} downloaded, {} on spotify)",
                     post.tracks.len(),
                     post.downloaded_count(),
                     post.spotify_count()
-                )?;
+                );
 
-                match &post.spotify_playlist {
-                    Some(playlist) => {
-                        writeln!(out, "playlist\t{} \u{2014} {}", playlist.id, playlist.name)?
-                    }
-                    None => writeln!(out, "playlist\t")?,
-                }
+                let playlist = match &post.spotify_playlist {
+                    Some(playlist) => format!(
+                        "{} \u{2014} {}",
+                        list::short_id(&playlist.id),
+                        playlist.name
+                    ),
+                    None => String::new(),
+                };
 
-                writeln!(out, "description\t{}", post.description)?;
-                writeln!(out)?;
+                let mut table = list::detail_table();
+                table.add_rows([
+                    ["locator", row.locator.as_str()],
+                    ["url", post.url.as_str()],
+                    ["title", post.title.as_str()],
+                    ["published", published.as_str()],
+                    ["modified", modified.as_str()],
+                    ["dir", post.dir.as_str()],
+                    ["tracks", tracks.as_str()],
+                    ["playlist", playlist.as_str()],
+                    ["description", post.description.as_str()],
+                ]);
 
-                writeln!(out, "{}", track::CHILD_HEADER)?;
-                for track in &post.tracks {
-                    TrackRow::new(post, track).write_child_row(&mut out)?;
-                }
+                writeln!(out, "{table}")?;
+                writeln!(out, "{}", track::child_table(row, &post.tracks))?;
             }
             Format::Json => {
-                let tracks: Vec<Value> = post
-                    .tracks
-                    .iter()
-                    .map(|track| TrackRow::new(post, track).child_json())
-                    .collect();
+                let tracks: Vec<Value> = row.track_rows().map(|row| row.child_json()).collect();
 
                 serde_json::to_writer_pretty(&mut out, &{
                     json!({
+                        "locator": row.locator,
                         "dir": post.dir,
                         "url": post.url,
                         "title": post.title,
@@ -215,32 +230,34 @@ enum Sort {
 }
 
 impl Sort {
-    fn compare(self, a: &BlogPost, b: &BlogPost) -> Ordering {
+    fn compare(self, a: &BlogPostRow, b: &BlogPostRow) -> Ordering {
         let by_field = match self {
-            Self::Published => b.published.cmp(&a.published),
-            Self::Title => normalize(&a.title).cmp(&normalize(&b.title)),
-            Self::Dir => a.dir.cmp(&b.dir),
+            Self::Published => b.post.published.cmp(&a.post.published),
+            Self::Title => normalize(&a.post.title).cmp(&normalize(&b.post.title)),
+            Self::Dir => a.post.dir.cmp(&b.post.dir),
         };
 
-        by_field.then_with(|| a.dir.cmp(&b.dir))
+        by_field.then_with(|| a.locator.cmp(&b.locator))
     }
 }
 
-impl Matchable for BlogPost {
+impl Matchable for BlogPostRow {
     fn search_fields(&self) -> Vec<Cow<'_, str>> {
+        let post = &self.post;
+
         let mut fields = vec![
-            Cow::from(self.dir.as_str()),
-            Cow::from(self.url.as_str()),
-            Cow::from(self.title.as_str()),
-            Cow::from(self.published.format(DATE_FORMAT).to_string()),
+            Cow::from(self.locator.as_str()),
+            Cow::from(post.dir.as_str()),
+            Cow::from(post.url.as_str()),
+            Cow::from(post.title.as_str()),
         ];
 
-        if let Some(playlist) = &self.spotify_playlist {
+        if let Some(playlist) = &post.spotify_playlist {
             fields.push(Cow::from(playlist.id.as_str()));
             fields.push(Cow::from(playlist.name.as_str()));
         }
 
-        for track in &self.tracks {
+        for track in &post.tracks {
             fields.push(Cow::from(track.title.as_str()));
             fields.push(Cow::from(track.artist.name.as_str()));
             fields.push(Cow::from(track.album_artist.name.as_str()));
@@ -251,10 +268,14 @@ impl Matchable for BlogPost {
     }
 
     fn identity_fields(&self) -> Vec<Cow<'_, str>> {
-        let mut fields = vec![Cow::from(self.url.as_str()), Cow::from(self.dir.as_str())];
+        let mut fields = vec![
+            Cow::from(self.locator.as_str()),
+            Cow::from(self.post.url.as_str()),
+            Cow::from(self.post.dir.as_str()),
+        ];
 
         // a playlist is 1:1 with its post, so its id names the post too
-        if let Some(playlist) = &self.spotify_playlist {
+        if let Some(playlist) = &self.post.spotify_playlist {
             fields.push(Cow::from(playlist.id.as_str()));
         }
 
@@ -262,14 +283,15 @@ impl Matchable for BlogPost {
     }
 }
 
-impl BlogPost {
+impl BlogPostRow {
     /// A post as it appears nested inside a track or playlist
     pub(crate) fn json_summary(&self) -> Value {
         json!({
-            "url": self.url,
-            "dir": self.dir,
-            "title": self.title,
-            "published": self.published,
+            "locator": self.locator,
+            "url": self.post.url,
+            "dir": self.post.dir,
+            "title": self.post.title,
+            "published": self.post.published,
         })
     }
 }

@@ -56,6 +56,15 @@ impl BlogPost {
     }
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) struct BlogPostRow {
+    pub(crate) post: BlogPost,
+
+    /// YYYY-MM-DD.NN, where YYYY-MM-DD is the post's publish date, and NN is an
+    /// ordinal number--the nth post published on that date.
+    pub(crate) locator: String,
+}
+
 #[derive(Debug, Eq, PartialEq, Clone, serde::Serialize)]
 pub(crate) struct SpotifyPlaylist {
     pub(crate) id: String,

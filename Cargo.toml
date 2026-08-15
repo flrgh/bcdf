@@ -11,6 +11,7 @@ anyhow = "1.0.104"
 audiotags = "0.5.0"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.5", features = ["derive"] }
+comfy-table = "8.0.0"
 flate2 = "1.1.9"
 futures = "0.3.33"
 fuzzt = "0.3.1"
@@ -33,3 +34,6 @@ unicode-normalization = "0.1.25"
 
 [dev-dependencies]
 tempfile = "3"
+
+[profile.dev]
+debug = "line-tables-only"

@@ -1,11 +1,9 @@
 use crate::track::TrackRow;
-use crate::types::BlogPost;
+use crate::types::BlogPostRow;
 use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 use unicode_normalization::UnicodeNormalization;
-
-pub(crate) const DATE_FORMAT: &str = "%Y-%m-%d";
 
 pub(crate) fn normalize(s: &str) -> String {
     s.nfc()
@@ -107,7 +105,7 @@ pub(crate) enum TrackQuery {
 }
 
 impl TrackQuery {
-    pub(crate) fn filter<'a>(&self, posts: &'a [BlogPost]) -> Vec<TrackRow<'a>> {
+    pub(crate) fn filter<'a>(&self, posts: &'a [BlogPostRow]) -> Vec<TrackRow<'a>> {
         match self {
             Self::Any(query) => TrackRow::all(posts)
                 .into_iter()
@@ -118,7 +116,10 @@ impl TrackQuery {
         }
     }
 
-    pub(crate) fn filter_unique<'a>(&self, posts: &'a [BlogPost]) -> anyhow::Result<TrackRow<'a>> {
+    pub(crate) fn filter_unique<'a>(
+        &self,
+        posts: &'a [BlogPostRow],
+    ) -> anyhow::Result<TrackRow<'a>> {
         let matches: Vec<TrackRow<'a>> = match self {
             Self::Any(query) => {
                 let rows = TrackRow::all(posts);
@@ -130,14 +131,15 @@ impl TrackQuery {
         unique(matches, self)
     }
 
-    fn in_post<'a>(post: &Query, number: usize, posts: &'a [BlogPost]) -> Vec<TrackRow<'a>> {
+    fn in_post<'a>(post: &Query, number: usize, posts: &'a [BlogPostRow]) -> Vec<TrackRow<'a>> {
         post.filter(posts)
             .into_iter()
-            .filter_map(|post| {
-                post.tracks
+            .filter_map(|row| {
+                row.post
+                    .tracks
                     .iter()
                     .find(|track| track.post_track_number == number)
-                    .map(|track| TrackRow::new(post, track))
+                    .map(|track| TrackRow::new(row, track))
             })
             .collect()
     }

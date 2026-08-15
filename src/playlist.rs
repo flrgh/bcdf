@@ -1,10 +1,12 @@
-use crate::list::Filters;
+use crate::list::ColumnSpec::{Num, Pin, Plain};
+use crate::list::{self, Filters};
 use crate::query::{normalize, Query};
 use crate::store::Store;
 use crate::track::{self, TrackRow};
-use crate::types::{BlogPost, Format, SpotifyPlaylist, Track};
+use crate::types::{BlogPost, BlogPostRow, Format, SpotifyPlaylist, Track};
 use chrono::SecondsFormat;
 use clap::Subcommand;
+use comfy_table::Cell;
 use serde_json::{json, Value};
 use std::cmp::Ordering;
 use std::io::Write;
@@ -58,17 +60,18 @@ impl List {
     fn exec(self, store: &Store) -> anyhow::Result<()> {
         let posts = store.list_posts()?;
 
-        let mut rows: Vec<(&BlogPost, &SpotifyPlaylist)> = posts
+        let mut rows: Vec<(&BlogPostRow, &SpotifyPlaylist)> = posts
             .iter()
-            .filter(|post| self.filters.published_at(&post.published))
-            .filter(|post| match &self.query {
-                Some(query) => query.matches(*post),
+            .filter(|row| self.filters.published_at(&row.post.published))
+            .filter(|row| match &self.query {
+                Some(query) => query.matches(*row),
                 None => true,
             })
-            .filter_map(|post| {
-                post.spotify_playlist
+            .filter_map(|row| {
+                row.post
+                    .spotify_playlist
                     .as_ref()
-                    .map(|playlist| (post, playlist))
+                    .map(|playlist| (row, playlist))
             })
             .collect();
 
@@ -86,23 +89,33 @@ impl List {
 
         match self.output {
             Format::Table => {
-                writeln!(out, "ID\tTRACKS\tPOST\tNAME")?;
-                for (post, playlist) in rows {
-                    write!(out, "{}\t", playlist.id)?;
-                    write!(out, "{}\t", post.playlist_tracks().count())?;
-                    write!(out, "{}\t", post.dir)?;
-                    writeln!(out, "{}", playlist.name)?;
+                let mut table = list::table([
+                    ("Id", Pin),
+                    ("Name", Plain),
+                    ("Tracks", Num),
+                    ("Post", Plain),
+                ]);
+
+                for (row, playlist) in rows {
+                    table.add_row(vec![
+                        Cell::new(list::short_id(&playlist.id)),
+                        Cell::new(&playlist.name),
+                        Cell::new(row.post.playlist_tracks().count()),
+                        Cell::new(&row.locator),
+                    ]);
                 }
+
+                writeln!(out, "{table}")?;
             }
             Format::Json => {
                 let values: Vec<Value> = rows
                     .iter()
-                    .map(|(post, playlist)| {
+                    .map(|(row, playlist)| {
                         json!({
                             "id": playlist.id,
                             "name": playlist.name,
-                            "tracks": post.playlist_tracks().count(),
-                            "post": post.json_summary(),
+                            "tracks": row.post.playlist_tracks().count(),
+                            "post": row.json_summary(),
                         })
                     })
                     .collect();
@@ -129,33 +142,35 @@ pub(crate) struct Show {
 impl Show {
     fn exec(self, store: &Store) -> anyhow::Result<()> {
         let posts = store.list_posts()?;
-        let post = self.query.filter_unique(&posts)?;
+        let row = self.query.filter_unique(&posts)?;
+        let post = &row.post;
 
         let Some(playlist) = &post.spotify_playlist else {
-            anyhow::bail!("{} has no spotify playlist", post.dir);
+            anyhow::bail!("{} has no spotify playlist", row.locator);
         };
 
         let mut out = std::io::stdout().lock();
         match self.output {
             Format::Table => {
                 let published = post.published.to_rfc3339_opts(SecondsFormat::Secs, true);
+                let tracks = post.playlist_tracks().count().to_string();
 
-                writeln!(out, "id\t{}", playlist.id)?;
-                writeln!(out, "name\t{}", playlist.name)?;
-                writeln!(out, "post\t{}", post.dir)?;
-                writeln!(out, "published\t{published}")?;
-                writeln!(out, "tracks\t{}", post.playlist_tracks().count())?;
-                writeln!(out)?;
+                let mut table = list::detail_table();
+                table.add_rows([
+                    ["id", list::short_id(&playlist.id)],
+                    ["name", playlist.name.as_str()],
+                    ["post", row.locator.as_str()],
+                    ["published", published.as_str()],
+                    ["tracks", tracks.as_str()],
+                ]);
 
-                writeln!(out, "{}", track::CHILD_HEADER)?;
-                for track in post.playlist_tracks() {
-                    TrackRow::new(post, track).write_child_row(&mut out)?;
-                }
+                writeln!(out, "{table}")?;
+                writeln!(out, "{}", track::child_table(row, post.playlist_tracks()))?;
             }
             Format::Json => {
                 let tracks: Vec<Value> = post
                     .playlist_tracks()
-                    .map(|track| TrackRow::new(post, track).child_json())
+                    .map(|track| TrackRow::new(row, track).child_json())
                     .collect();
 
                 serde_json::to_writer_pretty(
@@ -163,7 +178,7 @@ impl Show {
                     &json!({
                         "id": playlist.id,
                         "name": playlist.name,
-                        "post": post.json_summary(),
+                        "post": row.json_summary(),
                         "tracks": tracks,
                     }),
                 )?;
@@ -189,20 +204,21 @@ enum Sort {
 impl Sort {
     fn compare(
         self,
-        a: &(&BlogPost, &SpotifyPlaylist),
-        b: &(&BlogPost, &SpotifyPlaylist),
+        a: &(&BlogPostRow, &SpotifyPlaylist),
+        b: &(&BlogPostRow, &SpotifyPlaylist),
     ) -> Ordering {
         let by_field = match self {
-            Self::Published => b.0.published.cmp(&a.0.published),
+            Self::Published => b.0.post.published.cmp(&a.0.post.published),
             Self::Name => normalize(&a.1.name).cmp(&normalize(&b.1.name)),
             Self::Tracks => {
-                b.0.playlist_tracks()
+                b.0.post
+                    .playlist_tracks()
                     .count()
-                    .cmp(&a.0.playlist_tracks().count())
+                    .cmp(&a.0.post.playlist_tracks().count())
             }
         };
 
-        by_field.then_with(|| a.0.dir.cmp(&b.0.dir))
+        by_field.then_with(|| a.0.locator.cmp(&b.0.locator))
     }
 }
 

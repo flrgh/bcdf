@@ -1,6 +1,8 @@
 use crate::types::DateTime;
 use anyhow::anyhow;
 use chrono::{Local, Months, NaiveDate, TimeDelta, Utc};
+use comfy_table::presets::UTF8_FULL_CONDENSED;
+use comfy_table::{CellAlignment, ColumnConstraint, ContentArrangement, Table};
 use interim::{Dialect, Interval};
 use std::str::FromStr;
 
@@ -41,6 +43,55 @@ impl Filters {
         if let Some(limit) = self.limit {
             rows.truncate(limit);
         }
+    }
+}
+
+/// How a column renders: `Pin` holds it at its content width so wrapping falls on
+/// the other columns, `Num` right-aligns it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ColumnSpec {
+    Plain,
+    Pin,
+    Num,
+}
+
+pub(crate) fn detail_table() -> Table {
+    let mut table = Table::new();
+    table
+        .load_style(UTF8_FULL_CONDENSED)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    table
+}
+
+pub(crate) fn table<'a, T>(columns: T) -> Table
+where
+    T: IntoIterator<Item = (&'a str, ColumnSpec)>,
+{
+    let (names, specs): (Vec<&str>, Vec<ColumnSpec>) = columns.into_iter().unzip();
+
+    let mut table = detail_table();
+    table.set_header(names);
+
+    for (column, spec) in table.column_iter_mut().zip(specs) {
+        match spec {
+            ColumnSpec::Plain => {}
+            ColumnSpec::Pin => {
+                column.set_constraint(ColumnConstraint::ContentWidth);
+            }
+            ColumnSpec::Num => {
+                column.set_cell_alignment(CellAlignment::Right);
+            }
+        }
+    }
+
+    table
+}
+
+/// Spotify ids are `spotify:<kind>:<id>`; only the trailing id carries information.
+pub(crate) fn short_id(id: &str) -> &str {
+    match id.rsplit_once(':') {
+        Some((_, id)) => id,
+        None => id,
     }
 }
 

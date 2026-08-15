@@ -13,13 +13,13 @@ impl Cli {
     pub(crate) async fn exec(self, store: &mut Store) -> anyhow::Result<()> {
         match self.command {
             Command::Download => {
-                for mut post in store.list_posts()? {
-                    download::download(store, &mut post).await?;
+                for mut row in store.list_posts()? {
+                    download::download(store, &mut row.post).await?;
                 }
             }
             Command::Tag => {
-                for post in store.list_posts()? {
-                    tag::tag(store, &post).await?;
+                for row in store.list_posts()? {
+                    tag::tag(store, &row.post).await?;
                 }
             }
             Command::Rename { dry_run } => rename::rename(store, dry_run)?,

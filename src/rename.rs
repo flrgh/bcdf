@@ -25,7 +25,8 @@ pub(crate) fn rename(store: &mut Store, dry_run: bool) -> anyhow::Result<()> {
 
     let (mut renamed, mut adopted, mut failed) = (0, 0, 0);
 
-    for mut post in store.list_posts()? {
+    for row in store.list_posts()? {
+        let mut post = row.post;
         let recorded_dir = store.post_dir(&post);
         let mut projected_dir = recorded_dir.clone();
 
