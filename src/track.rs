@@ -1,14 +1,19 @@
-use crate::list::ColumnSpec::{Num, Pin, Plain};
-use crate::list::{self, ColumnSpec, Filters};
-use crate::query::{normalize, Matchable, TrackQuery};
-use crate::store::Store;
-use crate::types::{BlogPost, BlogPostRow, Format, Track};
 use clap::Subcommand;
 use comfy_table::{Cell, Table};
-use serde_json::{json, Value};
-use std::borrow::Cow;
-use std::cmp::Ordering;
+use serde_json::{Value, json};
 use std::io::Write;
+
+use crate::cli::Format;
+use crate::db::{
+    CustomQueries as _, Func, IntoSimpleExpr, Order, QueryOrder as _, Select, col, entity, full::*,
+    reverse, traits::*,
+};
+use crate::list::{
+    self, ColumnSpec,
+    ColumnSpec::{Num, Pin, Plain},
+    Filters,
+};
+use crate::query::TrackQuery;
 
 /// View and manage tracks
 #[derive(clap::Args, Debug)]
@@ -18,11 +23,11 @@ pub(crate) struct Cli {
 }
 
 impl Cli {
-    pub(crate) async fn exec(self, store: &Store) -> anyhow::Result<()> {
+    pub(crate) async fn exec(self, app: &crate::App) -> anyhow::Result<()> {
         match self.command {
-            Command::Ls(ls) => ls.exec(store),
-            Command::Show(show) => show.exec(store),
-            Command::Match(match_) => match_.exec(store).await,
+            Command::Ls(ls) => ls.exec(app).await,
+            Command::Show(show) => show.exec(app).await,
+            Command::Match(match_) => match_.exec(app).await,
         }
     }
 }
@@ -45,12 +50,8 @@ pub(crate) struct List {
     #[arg(value_name = "QUERY")]
     query: Option<TrackQuery>,
 
-    #[arg(long, value_enum, default_value = "post")]
+    #[command(flatten)]
     sort: Sort,
-
-    /// Reverse the sort order
-    #[arg(short, long)]
-    reverse: bool,
 
     #[command(flatten)]
     filters: Filters,
@@ -60,25 +61,15 @@ pub(crate) struct List {
 }
 
 impl List {
-    fn exec(self, store: &Store) -> anyhow::Result<()> {
-        let posts = store.list_posts()?;
-
-        let mut rows = match &self.query {
-            Some(query) => query.filter(&posts),
-            None => TrackRow::all(&posts),
-        };
-
-        rows.retain(|row| self.filters.published_at(&row.post().published));
-
-        rows.sort_by(|a, b| {
-            if self.reverse {
-                self.sort.compare(a, b).reverse()
-            } else {
-                self.sort.compare(a, b)
-            }
-        });
-
-        self.filters.limit_results(&mut rows);
+    async fn exec(self, app: &crate::App) -> anyhow::Result<()> {
+        let rows: Vec<PostTrack> = PostTrack::select()
+            .apply(|sel| self.filters.apply_timespec(sel, col::Post::PublishedAt))
+            .apply(self.query)
+            .apply(self.sort)
+            .limit_if(self.filters.limit())
+            .into_partial_model()
+            .all(&app.db)
+            .await?;
 
         let mut out = std::io::stdout().lock();
 
@@ -88,9 +79,9 @@ impl List {
                 header[0] = ("Track", Pin);
 
                 let mut table = list::table(header);
-                for row in rows {
+                for row in &rows {
                     let mut cells = row.child_cells();
-                    cells[0] = Cell::new(row.locator());
+                    cells[0] = Cell::new(row.short_id());
                     table.add_row(cells);
                 }
 
@@ -118,38 +109,39 @@ pub(crate) struct Show {
 }
 
 impl Show {
-    fn exec(self, store: &Store) -> anyhow::Result<()> {
-        let posts = store.list_posts()?;
-        let row = self.query.filter_unique(&posts)?;
+    async fn exec(self, app: &crate::App) -> anyhow::Result<()> {
+        let row = PostTrack::find_unique(&app.db, &self.query).await?;
 
         let mut out = std::io::stdout().lock();
         match self.output {
             Format::Table => {
-                let track = row.track;
+                let track = &row.track.track;
 
-                let secs = track.duration.as_secs();
-                let locator = row.locator();
-                let number = track.post_track_number.to_string();
+                let secs = track.duration as u64;
+                let short_id = row.short_id();
+                let number = row.post_track.post_track_number.to_string();
                 let duration = format!("{}:{:02}", secs / 60, secs % 60);
-                let bandcamp_id = track.bandcamp_id.to_string();
 
                 let mut table = list::detail_table();
                 table.add_rows([
-                    ["locator", locator.as_str()],
-                    ["post", row.post().dir.as_str()],
+                    ["short_id", short_id.as_str()],
+                    ["post", row.post.dir.as_str()],
                     ["number", number.as_str()],
                     ["title", track.title.as_str()],
-                    ["artist", track.artist.name.as_str()],
-                    ["album_artist", track.album_artist.name.as_str()],
-                    ["album", track.album.title.as_str()],
+                    ["artist", row.artist()],
+                    ["album_artist", row.track.artist.name.as_str()],
+                    ["album", row.track.release.title.as_str()],
                     ["duration", duration.as_str()],
-                    ["bandcamp_id", bandcamp_id.as_str()],
-                    ["spotify_id", list::short_id(opt_string(&track.spotify_id))],
+                    ["bandcamp_id", track.id.as_str()],
+                    [
+                        "spotify_id",
+                        list::short_spotify_id(opt_string(&track.spotify_id)),
+                    ],
                     [
                         "spotify_playlist_id",
-                        list::short_id(opt_string(&track.spotify_playlist_id)),
+                        list::short_spotify_id(opt_string(&row.post_track.spotify_playlist_id)),
                     ],
-                    ["file", opt_string(&track.filename)],
+                    ["file", opt_string(&row.post_track.filename)],
                     ["download_url", opt_string(&track.download_url)],
                 ]);
 
@@ -178,49 +170,49 @@ pub(crate) struct Match {
     dry_run: bool,
 }
 
+fn fmt_score(score: &Option<f64>) -> String {
+    match score {
+        Some(v) => v.to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
 impl Match {
-    async fn exec(self, store: &Store) -> anyhow::Result<()> {
-        let posts = store.list_posts()?;
-        let row = self.query.filter_unique(&posts)?;
+    async fn exec(self, app: &crate::App) -> anyhow::Result<()> {
+        let mut row = PostTrack::find_unique(&app.db, &self.query).await?;
 
-        fn fmt_score(s: &Option<f64>) -> String {
-            match s {
-                Some(v) => v.to_string(),
-                None => "unknown".to_string(),
-            }
-        }
+        let old_id = row.track.track.spotify_id.clone();
+        let old_score = row.track.track.spotify_match_score;
 
-        let old_id = &row.track.spotify_id;
-        let old_score = &row.track.spotify_match_score;
-        if let (Some(id), false) = (old_id, self.force) {
+        if let (Some(id), false) = (&old_id, self.force) {
             println!(
                 "unchanged: already matched ('{} - {}' => {}, score: {})",
-                row.track.artist.name,
-                row.track.title,
+                row.artist(),
+                row.track.track.title,
                 id,
-                fmt_score(old_score)
+                fmt_score(&old_score)
             );
             return Ok(());
         };
 
         let spotify = crate::spotify::connect().await?;
-        let mut track = row.track.clone();
-        track.spotify_id = None;
-        track.spotify_match_score = None;
-        spotify.search(&mut track).await?;
+        row.track.track.spotify_id = None;
+        row.track.track.spotify_match_score = None;
 
-        let update = match (old_id, &track.spotify_id) {
+        let (new_id, new_score) = match spotify.search(&row.track).await? {
+            Some((id, score)) => (Some(id), Some(score)),
+            None => (None, None),
+        };
+
+        let update = match (&old_id, &new_id) {
             (Some(old), Some(new)) => {
-                let new_score = &track.spotify_match_score;
-
                 if old == new {
-                    dbg!(&old_score, &new_score);
                     println!("unchanged: {old} is still the best spotify track match");
                     if old_score != new_score {
                         println!(
                             "match score will be updated from {} -> {}",
-                            fmt_score(old_score),
-                            fmt_score(new_score)
+                            fmt_score(&old_score),
+                            fmt_score(&new_score)
                         );
                         true
                     } else {
@@ -229,8 +221,8 @@ impl Match {
                 } else {
                     println!(
                         "changed: {old} (score: {}) => {new} (score: {})",
-                        fmt_score(old_score),
-                        fmt_score(new_score)
+                        fmt_score(&old_score),
+                        fmt_score(&new_score)
                     );
                     true
                 }
@@ -240,14 +232,14 @@ impl Match {
                 false
             }
             (None, Some(new)) => {
-                println!(
-                    "new match: {new} (score: {})",
-                    fmt_score(&track.spotify_match_score)
-                );
+                println!("new match: {new} (score: {})", fmt_score(&new_score));
                 true
             }
             (Some(old), None) => {
-                println!("changed: {old} (score: {}) will be removed. This might mean the track no longer exists on Spotify or that updated search criteria determined it to no longer be a suitable match", fmt_score(old_score));
+                println!(
+                    "changed: {old} (score: {}) will be removed. This might mean the track no longer exists on Spotify or that updated search criteria determined it to no longer be a suitable match",
+                    fmt_score(&old_score)
+                );
                 true
             }
         };
@@ -256,7 +248,9 @@ impl Match {
             if self.dry_run {
                 println!("dry run: no database changes made");
             } else {
-                store.update_track_spotify(&row.post().url, &track)?;
+                row.track.track.spotify_id = new_id;
+                row.track.track.spotify_match_score = new_score;
+                app.db.update_track(&row.track.track).await?;
             }
         }
 
@@ -264,8 +258,18 @@ impl Match {
     }
 }
 
+#[derive(clap::Args, Debug, Clone, Copy)]
+struct Sort {
+    #[arg(long = "sort", value_enum, default_value = "post")]
+    field: Field,
+
+    /// Reverse the sort order
+    #[arg(short, long)]
+    reverse: bool,
+}
+
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
-enum Sort {
+enum Field {
     /// Sort by newest post, then track number
     Post,
     /// Sort by track title, case-insensitive
@@ -276,18 +280,33 @@ enum Sort {
     Album,
 }
 
-impl Sort {
-    fn compare(self, a: &TrackRow, b: &TrackRow) -> Ordering {
-        let by_field = match self {
-            Self::Post => b.post().published.cmp(&a.post().published),
-            Self::Title => normalize(&a.track.title).cmp(&normalize(&b.track.title)),
-            Self::Artist => normalize(&a.track.artist.name).cmp(&normalize(&b.track.artist.name)),
-            Self::Album => normalize(&a.track.album.title).cmp(&normalize(&b.track.album.title)),
+impl ApplyTo<Select<entity::PostTrack>> for Sort {
+    fn apply_to(self, sel: Select<entity::PostTrack>) -> Select<entity::PostTrack> {
+        let (field, order) = match self.field {
+            Field::Post => (col::Post::PublishedAt.into_simple_expr(), Order::Desc),
+            Field::Title => (
+                Func::lower(col::Track::Title.into_simple_expr()).into_simple_expr(),
+                Order::Asc,
+            ),
+            Field::Artist => (
+                Func::lower(col::Artist::Name.into_simple_expr()).into_simple_expr(),
+                Order::Asc,
+            ),
+            Field::Album => (
+                Func::lower(col::Release::Title.into_simple_expr()).into_simple_expr(),
+                Order::Asc,
+            ),
         };
 
-        by_field
-            .then_with(|| a.post.locator.cmp(&b.post.locator))
-            .then_with(|| a.track.post_track_number.cmp(&b.track.post_track_number))
+        sel.order_by(field, reverse(order, self.reverse))
+            .order_by(
+                col::PostShortId::Id.into_simple_expr(),
+                reverse(Order::Desc, self.reverse),
+            )
+            .order_by(
+                col::PostTrack::PostTrackNumber.into_simple_expr(),
+                reverse(Order::Asc, self.reverse),
+            )
     }
 }
 
@@ -301,142 +320,84 @@ const CHILD_HEADER: [(&str, ColumnSpec); 7] = [
     ("Spotify", Pin),
 ];
 
-pub(crate) fn child_table<'a>(
-    post: &'a BlogPostRow,
-    tracks: impl IntoIterator<Item = &'a Track>,
-) -> Table {
+pub(crate) fn child_table<'a>(tracks: impl IntoIterator<Item = &'a PostTrack>) -> Table {
     let mut table = list::table(CHILD_HEADER);
     for track in tracks {
-        table.add_row(TrackRow::new(post, track).child_cells());
+        table.add_row(track.child_cells());
     }
     table
 }
 
-impl BlogPostRow {
-    pub(crate) fn track_rows(&self) -> impl Iterator<Item = TrackRow<'_>> {
-        self.post
-            .tracks
-            .iter()
-            .map(move |track| TrackRow::new(self, track))
-    }
-}
-
-/// A Track plus the post row it belongs to
-#[derive(Clone, Copy)]
-pub(crate) struct TrackRow<'a> {
-    post: &'a BlogPostRow,
-    track: &'a Track,
-}
-
-impl<'a> TrackRow<'a> {
-    pub(crate) fn new(post: &'a BlogPostRow, track: &'a Track) -> Self {
-        Self { post, track }
+impl PostTrack {
+    pub(crate) fn short_id(&self) -> String {
+        format!(
+            "{}.{:02}",
+            self.post_short_id.id, self.post_track.post_track_number
+        )
     }
 
-    pub(crate) fn all(posts: &'a [BlogPostRow]) -> Vec<Self> {
-        posts.iter().flat_map(BlogPostRow::track_rows).collect()
-    }
-
-    pub(crate) fn post(&self) -> &'a BlogPost {
-        &self.post.post
-    }
-
-    pub(crate) fn locator(&self) -> String {
-        format!("{}.{:02}", self.post.locator, self.track.post_track_number)
+    pub(crate) fn artist(&self) -> &str {
+        self.track
+            .track
+            .credited_artist
+            .as_deref()
+            .unwrap_or(self.track.artist.name.as_str())
     }
 
     pub(crate) fn child_cells(&self) -> Vec<Cell> {
-        let track = self.track;
-        let secs = track.duration.as_secs();
+        let track = &self.track.track;
+        let secs = track.duration as u64;
 
         vec![
-            Cell::new(track.post_track_number),
+            Cell::new(self.post_track.post_track_number),
             Cell::new(&track.title),
-            Cell::new(&track.artist.name),
-            Cell::new(&track.album.title),
+            Cell::new(self.artist()),
+            Cell::new(&self.track.release.title),
             Cell::new(format!("{}:{:02}", secs / 60, secs % 60)),
-            Cell::new(if track.filename.is_some() { "y" } else { "" }),
-            Cell::new(list::short_id(opt_string(&track.spotify_id))),
+            Cell::new(if self.post_track.filename.is_some() {
+                "y"
+            } else {
+                ""
+            }),
+            Cell::new(list::short_spotify_id(opt_string(&track.spotify_id))),
         ]
     }
 
     pub(crate) fn child_json(&self) -> Value {
-        let track = self.track;
+        let track = &self.track.track;
 
         json!({
             "title": track.title,
-            "artist": track.artist,
-            "album_artist": track.album_artist,
-            "album": track.album,
-            "duration_secs": track.duration.as_secs_f64(),
-            "post_track_number": track.post_track_number,
-            "album_track_number": track.album_track_number,
-            "bandcamp_id": track.bandcamp_id,
+            "artist": self.track.artist,
+            "credited_artist": track.credited_artist,
+            "release": self.track.release,
+            "duration_secs": track.duration,
+            "post_track_number": self.post_track.post_track_number,
+            "album_track_number": track.release_track_number,
+            "bandcamp_id": track.id,
             "download_url": track.download_url,
             "spotify": track.spotify_id.as_ref().map(|id| json!({
                 "id": id,
                 "match_score": track.spotify_match_score,
-                "playlist_id": track.spotify_playlist_id,
+                "playlist_id": self.post_track.spotify_playlist_id,
             })),
             // relative to the data directory, and what the database records
             // rather than what is on disk
-            "file": track.filename.as_ref().map(|name| json!({
+            "file": self.post_track.filename.as_ref().map(|name| json!({
                 "name": name,
-                "path": format!("{}/{}", self.post().dir, name),
+                "path": format!("{}/{}", self.post.dir, name),
             })),
         })
     }
 
     fn json(&self) -> Value {
         let mut value = self.child_json();
-        value["post"] = self.post.json_summary();
+        value["short_id"] = json!(self.short_id());
+        value["post"] = self.post.json_summary(&self.post_short_id.id);
         value
     }
 }
 
 fn opt_string(value: &Option<String>) -> &str {
     value.as_deref().unwrap_or_default()
-}
-
-impl Matchable for TrackRow<'_> {
-    fn search_fields(&self) -> Vec<Cow<'_, str>> {
-        let track = self.track;
-
-        let mut fields = vec![
-            Cow::from(self.locator()),
-            Cow::from(track.title.as_str()),
-            Cow::from(track.artist.name.as_str()),
-            Cow::from(track.album_artist.name.as_str()),
-            Cow::from(track.album.title.as_str()),
-            Cow::from(track.bandcamp_id.to_string()),
-            Cow::from(self.post().dir.as_str()),
-            Cow::from(self.post().url.as_str()),
-            Cow::from(self.post().title.as_str()),
-        ];
-
-        let optional = [
-            &track.filename,
-            &track.spotify_id,
-            &track.spotify_playlist_id,
-        ];
-
-        for value in optional.into_iter().flatten() {
-            fields.push(Cow::from(value.as_str()));
-        }
-
-        fields
-    }
-
-    fn identity_fields(&self) -> Vec<Cow<'_, str>> {
-        let mut fields = vec![
-            Cow::from(self.locator()),
-            Cow::from(self.track.bandcamp_id.to_string()),
-        ];
-
-        if let Some(spotify_id) = &self.track.spotify_id {
-            fields.push(Cow::from(spotify_id.as_str()));
-        }
-
-        fields
-    }
 }

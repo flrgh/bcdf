@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CACHE_CONTROL, PRAGMA, REFERER};
-use reqwest::Client;
+pub(crate) use reqwest::Client;
+use reqwest::header::{CACHE_CONTROL, HeaderMap, HeaderName, HeaderValue, PRAGMA, REFERER};
 
 const DEFAULT_USER_AGENT: &str = concat!(
     "Bandcamp Daily Blog Fetcher/",

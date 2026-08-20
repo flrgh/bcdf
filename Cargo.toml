@@ -1,7 +1,7 @@
 [package]
 name = "bcdf"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Follow the Bandcamp Daily blog: scrape posts, download mp3s, and build Spotify playlists"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -10,22 +10,26 @@ description = "Follow the Bandcamp Daily blog: scrape posts, download mp3s, and 
 anyhow = "1.0.104"
 audiotags = "0.5.0"
 chrono = { version = "0.4.45", features = ["serde"] }
-clap = { version = "4.6.5", features = ["derive"] }
+clap = { version = "4.6.6", features = ["derive"] }
 comfy-table = "8.0.0"
 flate2 = "1.1.9"
-futures = "0.3.33"
+futures = "0.3.34"
 fuzzt = "0.3.1"
 id3 = { version = "1.17.1", features = ["tokio"] }
 interim = { version = "0.2.1", default-features = false, features = ["std", "chrono_0_4"] }
+jiff = { version = "0.2.35", features = ["serde"] }
 lazy_static = "1.5.0"
+mp3-duration = "0.1.10"
 musicbrainz_rs = { version = "0.13.0", default-features = false, features = ["async"] }
 reqwest = { version = "0.13.4", features = ["stream"] }
 rspotify = { version = "0.16.1", features = ["cli", "client-reqwest", "reqwest-default-tls"] }
 rss = { version = "2.1.0", features = ["url", "serde", "atom", "chrono", "with-serde"] }
-rusqlite = { version = "0.40.1", features = ["bundled", "chrono", "fallible_uint"] }
+rusqlite = { version = "0.39", features = ["bundled", "chrono", "fallible_uint"] }
 scraper = "0.27.0"
+sea-orm = { version = "2.0.2", features = ["macros", "runtime-tokio-rustls", "sqlx-sqlite", "with-chrono", "with-json"] }
 serde = "1.0.229"
 serde_json = "1.0.151"
+sqlx = "0.9.0"
 strum = { version = "0.28.0", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["rt", "macros", "rt-multi-thread"] }
 tracing = { version = "0.1.44", features = ["log", "async-await"] }

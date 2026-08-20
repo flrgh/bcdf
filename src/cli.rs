@@ -1,37 +1,42 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Format {
+    Table,
+    Json,
+}
+
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub(crate) struct Cli {
     /// Base directory for storing state and downloaded mp3 files
-    #[arg(long, global = true, value_name = "DIR", default_value = crate::store::DEFAULT_DATA_DIR)]
-    data_dir: PathBuf,
+    #[arg(long, global = true, value_name = "DIR", default_value = crate::DEFAULT_DATA_DIR)]
+    pub(crate) data_dir: PathBuf,
 
     #[command(subcommand)]
     command: Command,
 
     #[command(flatten)]
-    logger: crate::log::Logger,
+    logging: crate::log::Logging,
 }
 
 impl Cli {
     pub(crate) fn new() -> Self {
-        Self::parse()
+        let cli = Self::parse();
+        cli.logging.init();
+        cli
     }
 
-    pub(crate) async fn exec(self) -> anyhow::Result<()> {
-        self.logger.init();
-
-        let mut store = crate::store::Store::open(&self.data_dir)?;
-
+    pub(crate) async fn exec(self, app: crate::App) -> anyhow::Result<()> {
         match self.command {
-            Command::Scan(scan) => scan.exec(&mut store).await,
-            Command::Mp3(mp3) => mp3.exec(&mut store).await,
-            Command::Post(post) => post.exec(&store),
-            Command::Track(track) => track.exec(&store).await,
-            Command::Playlist(playlist) => playlist.exec(&store),
-            Command::Spotify(spotify) => spotify.exec(&store).await,
+            Command::Scan(scan) => scan.exec(&app).await,
+            Command::Mp3(mp3) => mp3.exec(&app).await,
+            Command::Post(post) => post.exec(&app).await,
+            Command::Track(track) => track.exec(&app).await,
+            Command::Playlist(playlist) => playlist.exec(&app).await,
+            Command::Spotify(spotify) => spotify.exec().await,
+            Command::Scrape(cli) => cli.exec(&app).await,
         }
     }
 }
@@ -44,6 +49,7 @@ enum Command {
     Track(crate::track::Cli),
     Playlist(crate::playlist::Cli),
     Spotify(crate::spotify::Cli),
+    Scrape(crate::scrape::Cli),
 }
 
 #[cfg(test)]

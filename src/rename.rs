@@ -1,162 +1,141 @@
-use crate::store::Store;
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use anyhow::Context;
 
-enum Rename {
-    Done,
-    Move,
-    SourceMissing,
-    WouldClobber,
-}
+use crate::db::{
+    ActiveModelTrait as _, ActiveValue, CustomQueries as _, IntoActiveModel as _,
+    TransactionTrait as _, full, model,
+};
 
-impl Rename {
-    fn from(from: &Path, to: &Path, files: &HashSet<PathBuf>) -> Rename {
-        match (from.exists(), to.exists() || files.contains(to)) {
-            (false, true) => Rename::Done,
-            (true, false) => Rename::Move,
-            (false, false) => Rename::SourceMissing,
-            (true, true) => Rename::WouldClobber,
-        }
-    }
-}
-
-pub(crate) fn rename(store: &mut Store, dry_run: bool) -> anyhow::Result<()> {
-    let mut state: HashSet<PathBuf> = HashSet::new();
-
-    let (mut renamed, mut adopted, mut failed) = (0, 0, 0);
-
-    for row in store.list_posts()? {
-        let mut post = row.post;
-        let recorded_dir = store.post_dir(&post);
-        let mut projected_dir = recorded_dir.clone();
-
+impl crate::App {
+    async fn rename_post_dir(&self, post: &mut model::Post, dry_run: bool) -> anyhow::Result<bool> {
         let desired = post.derive_dir();
-        if desired != post.dir {
-            let to = store.path(&desired);
 
-            match Rename::from(&recorded_dir, &to, &state) {
-                Rename::Done => {
-                    tracing::info!(from = ?recorded_dir, ?to, "post directory already moved, recording it");
-                    state.insert(to.clone());
-                    projected_dir = to;
-
-                    if !dry_run {
-                        match store.set_post_dir(&post.url, &desired) {
-                            Ok(()) => {
-                                post.dir = desired;
-                                adopted += 1;
-                            }
-                            Err(error) => {
-                                tracing::error!(
-                                    ?error,
-                                    url = post.url,
-                                    "recording post directory failed"
-                                );
-                                failed += 1;
-                            }
-                        }
-                    }
-                }
-
-                Rename::SourceMissing => {
-                    tracing::warn!(from = ?recorded_dir, "recorded post directory is missing, leaving it alone");
-                }
-
-                Rename::WouldClobber => {
-                    tracing::error!(from = ?recorded_dir, ?to, "post directory destination is occupied");
-                    failed += 1;
-                }
-
-                Rename::Move => {
-                    tracing::info!(from = ?recorded_dir, ?to, dry_run, "renaming post directory");
-                    state.insert(to.clone());
-                    projected_dir = to;
-
-                    if !dry_run {
-                        if let Err(error) = store.rename_post_dir(&mut post, &desired) {
-                            tracing::error!(
-                                ?error,
-                                url = post.url,
-                                "renaming post directory failed"
-                            );
-                            failed += 1;
-                            projected_dir = recorded_dir.clone();
-                        } else {
-                            renamed += 1;
-                        }
-                    }
-                }
-            }
+        if desired == post.dir {
+            return Ok(false);
         }
 
-        let mut tracks = std::mem::take(&mut post.tracks);
+        let from = self.path(&post.dir);
+        let to = self.path(&desired);
 
-        for track in tracks.iter_mut() {
-            let Some(current) = track.filename.clone() else {
-                continue;
+        if !from.exists() {
+            anyhow::bail!("recorded post path does not exist");
+        } else if !from.is_dir() {
+            anyhow::bail!("recorded post path is not a directory");
+        } else if to.exists() {
+            anyhow::bail!("desired post path already exists");
+        }
+
+        tracing::info!(?from, ?to, dry_run, "renaming post directory");
+
+        if !dry_run {
+            let tx = self.db.begin().await?;
+
+            let updated = {
+                let mut active = post.clone().into_active_model();
+                active.dir = ActiveValue::Set(desired);
+                active.update(&tx).await?
             };
 
-            let desired = track.derive_filename();
-            if current == desired {
-                continue;
+            std::fs::rename(&from, &to).with_context(|| format!("renaming {from:?} to {to:?}"))?;
+
+            tx.commit().await?;
+
+            *post = updated;
+        }
+
+        Ok(true)
+    }
+
+    async fn rename_track_file(
+        &self,
+        post: &model::Post,
+        track: &mut full::PostTrack,
+        dry_run: bool,
+    ) -> anyhow::Result<bool> {
+        let Some(current) = track.post_track.filename.as_ref() else {
+            return Ok(false);
+        };
+
+        let desired = track.derive_filename();
+        if *current == desired {
+            return Ok(false);
+        }
+
+        let post_dir = self.path(&post.dir);
+
+        let from = post_dir.join(current);
+        let to = post_dir.join(&desired);
+
+        tracing::info!(?from, ?to, dry_run, "renaming track mp3 filename");
+
+        if !from.exists() {
+            anyhow::bail!("recorded track filename is missing");
+        } else if !from.is_file() {
+            anyhow::bail!("recorded track filename is not a regular file");
+        } else if to.exists() {
+            anyhow::bail!("desired track filename already exists");
+        }
+
+        if !dry_run {
+            let tx = self.db.begin().await?;
+
+            let updated = {
+                let mut active = track.post_track.clone().into_active_model();
+                active.filename = ActiveValue::Set(Some(desired));
+                active.update(&tx).await?
+            };
+
+            std::fs::rename(&from, &to).with_context(|| format!("renaming {from:?} to {to:?}"))?;
+
+            tx.commit().await?;
+
+            track.post_track = updated;
+        }
+
+        Ok(true)
+    }
+
+    pub(crate) async fn rename(&self, dry_run: bool) -> anyhow::Result<()> {
+        let mut renamed = 0;
+        let mut failed = 0;
+
+        for mut items in self.db.all_posts().await? {
+            match self.rename_post_dir(&mut items.post, dry_run).await {
+                Ok(true) => renamed += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::error!(
+                        ?error,
+                        url = items.post.url,
+                        "renaming post directory failed"
+                    );
+                    failed += 1;
+                    continue;
+                }
             }
 
-            let from = recorded_dir.join(&current);
-            let to = projected_dir.join(&desired);
-
-            match Rename::from(&from, &to, &state) {
-                Rename::Done => {
-                    tracing::info!(?from, ?to, "mp3 already moved, recording it");
-                    state.insert(to);
-
-                    if !dry_run {
-                        match store.set_track_filename(&post.url, track.post_track_number, &desired)
-                        {
-                            Ok(()) => {
-                                track.filename = Some(desired);
-                                adopted += 1;
-                            }
-                            Err(error) => {
-                                tracing::error!(?error, url = post.url, "recording mp3 failed");
-                                failed += 1;
-                            }
-                        }
-                    }
-                }
-
-                Rename::SourceMissing => {
-                    tracing::warn!(?from, "recorded mp3 is missing, leaving its record alone");
-                }
-
-                Rename::WouldClobber => {
-                    tracing::error!(?from, ?to, "mp3 destination is occupied");
-                    failed += 1;
-                }
-
-                Rename::Move => {
-                    tracing::info!(?from, ?to, dry_run, "renaming mp3");
-                    state.insert(to);
-
-                    if !dry_run {
-                        if let Err(error) = store.rename_track_file(&post, track, &desired) {
-                            tracing::error!(?error, url = post.url, "renaming mp3 failed");
-                            failed += 1;
-                        } else {
-                            renamed += 1;
-                        }
+            for track in items.tracks.iter_mut() {
+                match self.rename_track_file(&items.post, track, dry_run).await {
+                    Ok(true) => renamed += 1,
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::error!(
+                            ?error,
+                            url = track.post_track.post_url,
+                            "renaming track mp3 filename failed"
+                        );
+                        failed += 1;
+                        continue;
                     }
                 }
             }
         }
 
-        post.tracks = tracks;
+        tracing::info!(renamed, failed, dry_run, "rename complete");
+
+        if failed > 0 {
+            anyhow::bail!("{} rename(s) failed", failed);
+        }
+
+        Ok(())
     }
-
-    tracing::info!(renamed, adopted, failed, dry_run, "rename complete");
-
-    if failed > 0 {
-        anyhow::bail!("{} rename(s) failed", failed);
-    }
-
-    Ok(())
 }

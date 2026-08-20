@@ -1,16 +1,19 @@
-use crate::list::ColumnSpec::{Num, Pin, Plain};
-use crate::list::{self, Filters};
-use crate::query::{normalize, Matchable, Query};
-use crate::store::Store;
-use crate::track;
-use crate::types::{BlogPostRow, Format};
 use chrono::SecondsFormat;
 use clap::Subcommand;
 use comfy_table::Cell;
-use serde_json::{json, Value};
-use std::borrow::Cow;
-use std::cmp::Ordering;
+use serde_json::{Value, json};
 use std::io::Write;
+
+use crate::cli::Format;
+use crate::db::{
+    Func, IntoSimpleExpr, Order, QueryOrder, Select, col, entity, full, model, reverse,
+    traits::{Apply, ApplyTo, LimitIf},
+    views,
+};
+use crate::list::ColumnSpec::{Num, Pin, Plain};
+use crate::list::{self, Filters};
+use crate::query::Query;
+use crate::track;
 
 /// View/manage bandcamp blog posts
 #[derive(clap::Args, Debug)]
@@ -20,10 +23,10 @@ pub(crate) struct Cli {
 }
 
 impl Cli {
-    pub(crate) fn exec(self, store: &Store) -> anyhow::Result<()> {
+    pub(crate) async fn exec(self, app: &crate::App) -> anyhow::Result<()> {
         match self.command {
-            Command::Ls(ls) => ls.exec(store),
-            Command::Show(show) => show.exec(store),
+            Command::Ls(ls) => ls.exec(app).await,
+            Command::Show(show) => show.exec(app).await,
         }
     }
 }
@@ -34,12 +37,8 @@ pub(crate) struct List {
     #[arg(value_name = "QUERY")]
     query: Option<Query>,
 
-    #[arg(long, value_enum, default_value = "published")]
+    #[command(flatten)]
     sort: Sort,
-
-    /// Reverse the sort order
-    #[arg(short, long)]
-    reverse: bool,
 
     #[command(flatten)]
     filters: Filters,
@@ -49,27 +48,15 @@ pub(crate) struct List {
 }
 
 impl List {
-    fn exec(self, store: &Store) -> anyhow::Result<()> {
-        let posts = store
-            .list_posts()?
-            .into_iter()
-            .filter(|row| self.filters.published_at(&row.post.published))
-            .filter(|row| match &self.query {
-                Some(query) => query.matches(row),
-                None => true,
-            });
+    async fn exec(self, app: &crate::App) -> anyhow::Result<()> {
+        let select = views::PostSummary::select()
+            .apply(|sel| self.filters.apply_timespec(sel, col::Post::PublishedAt))
+            .apply(self.query)
+            .apply(self.sort)
+            .limit_if(self.filters.limit())
+            .into_partial_model();
 
-        let mut posts: Vec<BlogPostRow> = posts.collect();
-
-        posts.sort_by(|a, b| {
-            if self.reverse {
-                self.sort.compare(a, b).reverse()
-            } else {
-                self.sort.compare(a, b)
-            }
-        });
-
-        self.filters.limit_results(&mut posts);
+        let posts: Vec<views::PostSummary> = select.all(&app.db).await?;
 
         let mut out = std::io::stdout().lock();
 
@@ -87,14 +74,14 @@ impl List {
                 for row in posts.iter() {
                     let post = &row.post;
                     table.add_row(vec![
-                        Cell::new(&row.locator),
-                        Cell::new(post.tracks.len()),
-                        Cell::new(post.downloaded_count()),
-                        Cell::new(post.spotify_count()),
+                        Cell::new(&row.short_id.id),
+                        Cell::new(row.tracks),
+                        Cell::new(row.downloaded),
+                        Cell::new(row.spotify),
                         Cell::new(
-                            post.spotify_playlist
+                            row.playlist
                                 .as_ref()
-                                .map(|p| list::short_id(&p.id))
+                                .map(|p| list::short_spotify_id(&p.id))
                                 .unwrap_or_default(),
                         ),
                         Cell::new(&post.title),
@@ -109,16 +96,16 @@ impl List {
                     .map(|row| {
                         let post = &row.post;
                         json!({
-                            "locator": row.locator,
+                            "short_id": row.short_id.id,
                             "dir": post.dir,
                             "url": post.url,
                             "title": post.title,
-                            "published": post.published,
-                            "modified": post.modified,
-                            "tracks": post.tracks.len(),
-                            "downloaded": post.downloaded_count(),
-                            "spotify": post.spotify_count(),
-                            "playlist": post.spotify_playlist,
+                            "published": post.published_at,
+                            "modified": post.modified_at,
+                            "tracks": row.tracks,
+                            "downloaded": row.downloaded,
+                            "spotify": row.spotify,
+                            "playlist": row.playlist,
                         })
                     })
                     .collect();
@@ -143,28 +130,29 @@ pub(crate) struct Show {
 }
 
 impl Show {
-    fn exec(self, store: &Store) -> anyhow::Result<()> {
-        let posts = store.list_posts()?;
-        let row = self.query.filter_unique(&posts)?;
-        let post = &row.post;
+    async fn exec(self, app: &crate::App) -> anyhow::Result<()> {
+        let Some(row) = full::Post::find_unique(&app.db, &self.query).await? else {
+            anyhow::bail!("no post matched {}", self.query);
+        };
 
         let mut out = std::io::stdout().lock();
+        let post = &row.post;
         match self.output {
             Format::Table => {
-                let published = post.published.to_rfc3339_opts(SecondsFormat::Secs, true);
-                let modified = post.modified.to_rfc3339_opts(SecondsFormat::Secs, true);
+                let published = post.published_at.to_rfc3339_opts(SecondsFormat::Secs, true);
+                let modified = post.modified_at.to_rfc3339_opts(SecondsFormat::Secs, true);
 
                 let tracks = format!(
                     "{} ({} downloaded, {} on spotify)",
-                    post.tracks.len(),
-                    post.downloaded_count(),
-                    post.spotify_count()
+                    row.tracks.len(),
+                    row.downloaded_count(),
+                    row.spotify_count()
                 );
 
-                let playlist = match &post.spotify_playlist {
+                let playlist = match &row.playlist {
                     Some(playlist) => format!(
                         "{} \u{2014} {}",
-                        list::short_id(&playlist.id),
+                        list::short_spotify_id(&playlist.id),
                         playlist.name
                     ),
                     None => String::new(),
@@ -172,7 +160,7 @@ impl Show {
 
                 let mut table = list::detail_table();
                 table.add_rows([
-                    ["locator", row.locator.as_str()],
+                    ["short_id", row.short_id.id.as_str()],
                     ["url", post.url.as_str()],
                     ["title", post.title.as_str()],
                     ["published", published.as_str()],
@@ -184,21 +172,22 @@ impl Show {
                 ]);
 
                 writeln!(out, "{table}")?;
-                writeln!(out, "{}", track::child_table(row, &post.tracks))?;
+
+                writeln!(out, "{}", track::child_table(&row.tracks))?;
             }
             Format::Json => {
-                let tracks: Vec<Value> = row.track_rows().map(|row| row.child_json()).collect();
+                let tracks: Vec<Value> = row.tracks.iter().map(|row| row.child_json()).collect();
 
                 serde_json::to_writer_pretty(&mut out, &{
                     json!({
-                        "locator": row.locator,
+                        "short_id": row.short_id.id,
                         "dir": post.dir,
                         "url": post.url,
                         "title": post.title,
                         "description": post.description,
-                        "published": post.published,
-                        "modified": post.modified,
-                        "playlist": post.spotify_playlist,
+                        "published": post.published_at,
+                        "modified": post.modified_at,
+                        "playlist": row.playlist,
                         "tracks": tracks,
                     })
                 })?;
@@ -219,8 +208,18 @@ enum Command {
     Show(Show),
 }
 
+#[derive(clap::Args, Debug, Clone, Copy)]
+struct Sort {
+    #[arg(long = "sort", value_enum, default_value = "published")]
+    field: Field,
+
+    /// Reverse the sort order
+    #[arg(short, long)]
+    reverse: bool,
+}
+
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
-enum Sort {
+enum Field {
     /// Sort by date published (newest first)
     Published,
     /// Sort by title, case-insensitive
@@ -229,69 +228,33 @@ enum Sort {
     Dir,
 }
 
-impl Sort {
-    fn compare(self, a: &BlogPostRow, b: &BlogPostRow) -> Ordering {
-        let by_field = match self {
-            Self::Published => b.post.published.cmp(&a.post.published),
-            Self::Title => normalize(&a.post.title).cmp(&normalize(&b.post.title)),
-            Self::Dir => a.post.dir.cmp(&b.post.dir),
+impl ApplyTo<Select<entity::Post>> for Sort {
+    fn apply_to(self, sel: Select<entity::Post>) -> Select<entity::Post> {
+        let (field, order) = match self.field {
+            Field::Published => (col::Post::PublishedAt.into_simple_expr(), Order::Desc),
+            Field::Title => (
+                Func::lower(col::Post::Title.into_simple_expr()).into_simple_expr(),
+                Order::Asc,
+            ),
+            Field::Dir => (
+                Func::lower(col::Post::Dir.into_simple_expr()).into_simple_expr(),
+                Order::Asc,
+            ),
         };
 
-        by_field.then_with(|| a.locator.cmp(&b.locator))
+        sel.order_by(field, reverse(order, self.reverse))
     }
 }
 
-impl Matchable for BlogPostRow {
-    fn search_fields(&self) -> Vec<Cow<'_, str>> {
-        let post = &self.post;
-
-        let mut fields = vec![
-            Cow::from(self.locator.as_str()),
-            Cow::from(post.dir.as_str()),
-            Cow::from(post.url.as_str()),
-            Cow::from(post.title.as_str()),
-        ];
-
-        if let Some(playlist) = &post.spotify_playlist {
-            fields.push(Cow::from(playlist.id.as_str()));
-            fields.push(Cow::from(playlist.name.as_str()));
-        }
-
-        for track in &post.tracks {
-            fields.push(Cow::from(track.title.as_str()));
-            fields.push(Cow::from(track.artist.name.as_str()));
-            fields.push(Cow::from(track.album_artist.name.as_str()));
-            fields.push(Cow::from(track.album.title.as_str()));
-        }
-
-        fields
-    }
-
-    fn identity_fields(&self) -> Vec<Cow<'_, str>> {
-        let mut fields = vec![
-            Cow::from(self.locator.as_str()),
-            Cow::from(self.post.url.as_str()),
-            Cow::from(self.post.dir.as_str()),
-        ];
-
-        // a playlist is 1:1 with its post, so its id names the post too
-        if let Some(playlist) = &self.post.spotify_playlist {
-            fields.push(Cow::from(playlist.id.as_str()));
-        }
-
-        fields
-    }
-}
-
-impl BlogPostRow {
+impl model::Post {
     /// A post as it appears nested inside a track or playlist
-    pub(crate) fn json_summary(&self) -> Value {
+    pub(crate) fn json_summary(&self, short_id: &str) -> Value {
         json!({
-            "locator": self.locator,
-            "url": self.post.url,
-            "dir": self.post.dir,
-            "title": self.post.title,
-            "published": self.post.published,
+            "short_id": short_id,
+            "url": self.url,
+            "dir": self.dir,
+            "title": self.title,
+            "published": self.published_at,
         })
     }
 }

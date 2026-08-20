@@ -1,11 +1,12 @@
-use std::marker::PhantomData;
-
-use std::collections::BTreeSet;
-
 use fuzzt::algorithms::{jaro, normalized_levenshtein};
+use std::collections::BTreeSet;
+use std::marker::PhantomData;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::types::{self, Duration, SpotifyTrack};
+use crate::{
+    db::{full, model},
+    types::{Duration, SpotifyTrack},
+};
 
 const TITLE_WEIGHT: f64 = 100.0;
 const ARTIST_WEIGHT: f64 = 50.0;
@@ -15,17 +16,6 @@ const TRACKNUM_WEIGHT: f64 = 5.0;
 
 const MIN_TITLE_SCORE: f64 = 95.0;
 const MIN_ARTIST_SCORE: f64 = 90.0;
-
-const DURATION_MATCH: Duration = Duration::from_secs(2);
-
-/// Floor for the duration gate, and the fraction of the track it widens to.
-/// A flat 15s is 6% of a four-minute song but 1% of a twenty-minute one, and
-/// long-form pieces routinely differ by more than that between a bandcamp
-/// master and a Spotify release. Measured over same-artist wrong pairs, moving
-/// from a flat 15s to 5% lets 13.7% through instead of 13.1%; at 10% it is
-/// 19.2%, which is where the gate stops earning its keep.
-const DURATION_LIMIT: Duration = Duration::from_secs(15);
-const DURATION_LIMIT_RATIO: f64 = 0.05;
 
 fn normalize(s: &str) -> String {
     fn replace_equivalent_char(c: char) -> char {
@@ -45,7 +35,7 @@ fn normalize(s: &str) -> String {
         c
     }
 
-    fn keep_char(c: &char) -> bool {
+    fn remove_parens_and_brackets(c: &char) -> bool {
         const REMOVE: &[char] = &['(', ')', '[', ']'];
         !REMOVE.contains(c)
     }
@@ -55,7 +45,7 @@ fn normalize(s: &str) -> String {
         s.trim_end_matches(STRIP_SUFFIXES).to_string()
     }
 
-    fn keep_segment(s: &&str) -> bool {
+    fn drop_separators(s: &&str) -> bool {
         const DROP_SEGMENTS: &[&str] = &["-", "/", ":"];
         !DROP_SEGMENTS.contains(s)
     }
@@ -88,77 +78,75 @@ fn normalize(s: &str) -> String {
         Some(s)
     }
 
-    // Strip the Combining Diacritical Marks block only. `Mn` at large would take
-    // the Japanese dakuten with it, turning が into か.
-    let s = s
-        .nfd()
-        .filter(|c| !matches!(c, '\u{0300}'..='\u{036F}'))
-        .nfc()
-        .collect::<String>()
-        .to_lowercase();
+    fn strip_combining_diacritical_marks(c: &char) -> bool {
+        !matches!(*c, '\u{0300}'..='\u{036F}')
+    }
 
-    let input = &s;
-
-    let s = strip_suffix(&s);
+    let input = s;
 
     let normalized = s
-        .chars()
+        .nfd()
+        .filter(strip_combining_diacritical_marks)
+        .nfc()
+        .map(|c| c.to_ascii_lowercase())
         .map(replace_equivalent_char)
-        .filter(keep_char)
+        .filter(remove_parens_and_brackets)
         .collect::<String>()
         .split(is_segment_separator)
         .filter_map(trim_empty_segments)
-        .filter(keep_segment)
+        .filter(drop_separators)
         .map(replace_segment)
         .collect::<Vec<&str>>()
         .join(" ");
 
+    let normalized = strip_suffix(&normalized);
+
     // did normalization produce a radically different value from the input?
-    // not a warning: a title that is mostly punctuation is odd, not wrong.
     let diff = (1.0 - jaro(input, &normalized)) * 100.0;
     if diff > 50.0 {
-        tracing::debug!(input, normalized, diff, "normalization was destructive");
+        tracing::debug!(
+            input,
+            normalized,
+            diff,
+            "potentially over-normalized search string"
+        );
     }
 
     normalized
 }
 
-/// A subset comparison scores a flat 1.0, so it is only trustworthy once enough
-/// words are shared. Below this a one-word title matches every longer title
-/// containing that word: `title` would score 100 against `nope nope bad title`.
-const MIN_SHARED_TOKENS: usize = 2;
+fn common_words(a: &str, b: &str) -> f64 {
+    const MIN_SHARED_WORDS: usize = 2;
 
-/// Set comparison that makes whole-token insertion free. Because the sets are
-/// sorted, the shared tokens are a literal prefix of both sides, so when one
-/// title's tokens are a subset of the other's the comparison is exactly 1.0 --
-/// which is the shape of a featured artist, a section prefix, and a
-/// parenthetical tag. Jaro cannot see through any of them: an inserted word
-/// blows out both of its length-ratio terms at once.
-fn token_set(a: &str, b: &str) -> f64 {
-    let ta: BTreeSet<&str> = a.split_whitespace().collect();
-    let tb: BTreeSet<&str> = b.split_whitespace().collect();
+    fn join<'a, T>(words: T) -> String
+    where
+        T: IntoIterator<Item = &'a &'a str>,
+    {
+        words.into_iter().copied().collect::<Vec<&str>>().join(" ")
+    }
 
-    let join = |tokens: Vec<&&str>| tokens.into_iter().copied().collect::<Vec<&str>>().join(" ");
+    let set_a: BTreeSet<&str> = a.split_whitespace().collect();
+    let set_b: BTreeSet<&str> = b.split_whitespace().collect();
 
-    let shared = join(ta.intersection(&tb).collect());
-    let a_only = join(ta.difference(&tb).collect());
-    let b_only = join(tb.difference(&ta).collect());
+    let shared: Vec<_> = set_a.intersection(&set_b).collect();
+    let shared_count = shared.len();
+
+    let shared = join(shared);
+    let a_only = join(set_a.difference(&set_b));
+    let b_only = join(set_b.difference(&set_a));
 
     let with_a = format!("{shared} {a_only}").trim().to_string();
     let with_b = format!("{shared} {b_only}").trim().to_string();
 
-    let subset = if ta.intersection(&tb).count() >= MIN_SHARED_TOKENS {
-        normalized_levenshtein(&shared, &with_a).max(normalized_levenshtein(&shared, &with_b))
+    if shared_count >= MIN_SHARED_WORDS {
+        normalized_levenshtein(&with_a, &with_b)
+            .max(normalized_levenshtein(&shared, &with_a))
+            .max(normalized_levenshtein(&shared, &with_b))
     } else {
-        0.0
-    };
-
-    // comparing the two sorted joins is what makes this symmetric: it does not
-    // matter which platform carries the extra tokens
-    subset.max(normalized_levenshtein(&with_a, &with_b))
+        normalized_levenshtein(&with_a, &with_b)
+    }
 }
 
-/// Words that introduce a performer credit rather than part of a title.
 const CREDIT_MARKERS: &[&str] = &[
     "feat",
     "feat.",
@@ -171,169 +159,136 @@ const CREDIT_MARKERS: &[&str] = &[
     "with",
 ];
 
-/// `with` is omitted: outside brackets it is far more often part of the title
-/// than a credit.
-const BARE_CREDIT_MARKERS: &[&str] = &[
-    "feat",
-    "feat.",
-    "feat:",
-    "featuring",
-    "ft",
-    "ft.",
-    "ft:",
-    "w/",
-];
+fn contains(needle: &str, haystack: &[&str]) -> bool {
+    haystack.iter().any(|s| s.eq_ignore_ascii_case(needle))
+}
 
-/// Words separating one performer from the next within a single field.
-const ARTIST_SEPARATORS: &[&str] = &["and", "vs", "vs."];
-
-/// Tags naming a different performance rather than a different master. A live
-/// take and the studio recording share a title and often a runtime, so pulling
-/// the tag out of the title makes them indistinguishable unless it also vetoes.
-/// `remaster`, `deluxe` and friends are deliberately absent: same performance.
-const VERSION_TAGS: &[&str] = &[
+const TAGS: [&str; 8] = [
+    "acoustic",
+    "demo",
+    "dub",
+    "instrumental",
     "live",
     "remix",
-    "instrumental",
-    "demo",
-    "acoustic",
     "reprise",
-    "dub",
     "rework",
 ];
 
-fn version_tags(text: &str) -> Vec<String> {
-    let lower = text.to_lowercase();
-    let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).collect();
-
-    let mut tags: Vec<String> = VERSION_TAGS
-        .iter()
-        .filter(|tag| words.contains(&&***tag))
-        .map(|tag| tag.to_string())
-        .collect();
-
-    tags.sort();
-    tags.dedup();
-    tags
+trait Tags {
+    fn set_tags(self, tags: &mut usize);
 }
 
-fn is_marker(word: &str, markers: &[&str]) -> bool {
-    let lower = word.to_lowercase();
-    markers.contains(&lower.as_str())
-}
-
-/// The performers a bracketed group names, or nothing when the group is a tag
-/// (`Remastered`, `Live`, a label code) rather than a credit.
-fn credited(group: &str) -> Vec<String> {
-    let mut words = group.split_whitespace();
-    let Some(first) = words.next() else {
-        return vec![];
-    };
-
-    if !is_marker(first, CREDIT_MARKERS) {
-        return vec![];
+impl Tags for &str {
+    fn set_tags(self, tags: &mut usize) {
+        for elem in self.split(|c: char| !c.is_alphanumeric()) {
+            for (i, tag) in TAGS.iter().enumerate() {
+                if tag.eq_ignore_ascii_case(elem) {
+                    *tags |= 1 << i;
+                    break;
+                }
+            }
+        }
     }
-
-    Artists::parse(&words.collect::<Vec<_>>().join(" ")).split
 }
 
-/// Split at the first credit marker, into the part before it and the part after.
-fn split_at_marker(s: &str, markers: &[&str]) -> Option<(String, String)> {
-    let words: Vec<&str> = s.split_whitespace().collect();
-    let pos = words.iter().position(|w| is_marker(w, markers))?;
-
-    let head = words[..pos].join(" ");
-    let tail = words[pos + 1..].join(" ");
-
-    if head.is_empty() || tail.is_empty() {
-        return None;
-    }
-
-    Some((head, tail))
-}
-
-fn tidy(s: &str) -> String {
-    s.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim_end_matches([' ', '-', ',', ':', '/'])
-        .trim()
-        .to_string()
-}
-
-/// A track title with the credits packed into it pulled out. Bandcamp writes
-/// `Simple (feat. Sene)` for a track Spotify indexes as `Simple` with Sene as a
-/// performer, so neither the query nor the comparison should carry the
-/// parenthetical.
+// A track title and its parsed metadata. There are a couple things that we may
+// encounter within a track title, and this aims to detect and parse them:
+//
+// * featured artist: Bandcamp puts featured artists in the track title, but
+//     Spotify usually does not.
+// * release tags: "live", "demo", etc
 #[derive(Debug, Clone)]
-pub(crate) struct Title {
+pub(crate) struct TrackTitle {
     original: String,
     core: String,
     featured: Vec<String>,
-    /// version tags found in the parts stripped from `core`, sorted
-    tags: Vec<String>,
+    tags: usize,
 }
 
-impl Title {
-    pub(crate) fn parse(raw: &str) -> Self {
+impl<T: AsRef<str>> From<T> for TrackTitle {
+    fn from(value: T) -> Self {
+        Self::from_str(value.as_ref())
+    }
+}
+
+impl TrackTitle {
+    pub(crate) fn from_str(raw: &str) -> Self {
         let mut core = String::new();
-        let mut group = String::new();
         let mut featured = Vec::new();
-        let mut tag_text = String::new();
-        let mut depth = 0usize;
+        let mut tags = 0usize;
 
-        for c in raw.chars() {
-            match c {
-                '(' | '[' => {
-                    depth += 1;
-                    if depth == 1 {
-                        group.clear();
-                        continue;
+        {
+            let mut slice = raw;
+            while let Some((from, last)) = slice.char_indices().find_map(|(i, c)| match c {
+                '(' => Some((i, ')')),
+                '[' => Some((i, ']')),
+                _ => None,
+            }) {
+                core.push_str(&slice[..from]);
+                slice = &slice[(from + 1)..];
+
+                let Some(to) = slice.find(last) else {
+                    break;
+                };
+
+                let group = &slice[..to];
+                if group.is_empty() {
+                    break;
+                }
+                slice = &slice[(to + 1)..];
+
+                match group.split_once(|c: char| c.is_whitespace()) {
+                    Some((first, rest)) if contains(first, CREDIT_MARKERS) => {
+                        featured.extend(TrackArtists::split(rest));
+                    }
+                    _ => {
+                        group.set_tags(&mut tags);
                     }
                 }
-                ')' | ']' if depth > 0 => {
-                    depth -= 1;
-                    if depth == 0 {
-                        let credits = credited(&group);
-                        if credits.is_empty() {
-                            tag_text.push(' ');
-                            tag_text.push_str(&group);
-                        } else {
-                            featured.extend(credits);
-                        }
-                        continue;
-                    }
-                }
-                _ => {}
             }
 
-            if depth == 0 {
-                core.push(c);
-            } else {
-                group.push(c);
+            core.push_str(slice);
+        }
+
+        // extract a possible credited artist name from the title
+        {
+            let words: Vec<&str> = core.split_whitespace().collect();
+            let found = words
+                .iter()
+                // if we see `with` outside of brackets/parens, it's more likely
+                // to be part of the title and not signifying a featured artist
+                .position(|word| {
+                    !word.eq_ignore_ascii_case("with") && contains(word, CREDIT_MARKERS)
+                });
+
+            if let Some(found) = found
+                && found > 0
+                && found < (words.len() - 1)
+            {
+                let head = &words[..found];
+                let tail = &words[found + 1..];
+
+                let credited = tail.join(" ");
+                featured.extend(TrackArtists::split(&credited));
+
+                core = head.join(" ");
             }
-        }
+        };
 
-        // an unclosed bracket is punctuation, not structure
-        if depth > 0 {
-            core.push_str(&group);
-        }
+        let core = core
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim_end_matches([' ', '-', ',', ':', '/'])
+            .trim()
+            .to_string();
 
-        if let Some((head, credit)) = split_at_marker(&core, BARE_CREDIT_MARKERS) {
-            featured.extend(Artists::parse(&credit).split);
-            core = head;
-        }
-
-        let core = tidy(&core);
-
-        // a trailing dash segment is where Spotify puts what bandcamp brackets
         if let Some((_, trailing)) = core.rsplit_once(" - ") {
-            tag_text.push(' ');
-            tag_text.push_str(trailing);
+            trailing.set_tags(&mut tags);
         }
 
         Self {
-            tags: version_tags(&tag_text),
+            tags,
             core: if core.is_empty() {
                 raw.trim().to_string()
             } else {
@@ -347,46 +302,42 @@ impl Title {
     pub(crate) fn core(&self) -> &str {
         &self.core
     }
-
-    /// On compilations bandcamp leaves the artist field as `Various Artists` and
-    /// writes the real performer into the title: `Circadian Rhythm - Shela`.
-    pub(crate) fn credited_artist(&self) -> Option<(String, String)> {
-        for sep in [" - ", " : ", " -- "] {
-            if let Some((artist, title)) = self.core.split_once(sep) {
-                let (artist, title) = (artist.trim(), title.trim());
-                if !artist.is_empty() && !title.is_empty() {
-                    return Some((artist.to_string(), title.to_string()));
-                }
-            }
-        }
-
-        None
-    }
 }
 
-/// The performers named in an artist field. Bandcamp packs them into one string
-/// (`Roser/Moser/Asselbergs`); Spotify splits them into an array.
+// When a track has multiple artists on it, Bandcamp embeds them into a single
+// string, whereas Spotify records them as separate, structured array elements
+// in the track metadata.
 #[derive(Debug, Clone)]
-pub(crate) struct Artists {
-    /// the field as written, or Spotify's array joined back together
-    packed: String,
-    /// individual performers, lead first; never empty
+pub(crate) struct TrackArtists {
+    // for Bandcamp, the "original", unmodified artist string
+    // for Spotify, the artist names joined together
+    joined: String,
+
+    // individual artist names, with the lead/main artist first
     split: Vec<String>,
 }
 
-impl Artists {
-    pub(crate) fn parse(raw: &str) -> Self {
-        // `w/` would otherwise be torn in half by the `/` separator
-        let separated = raw.replace(" w/ ", " & ");
+impl<T: AsRef<str>> From<T> for TrackArtists {
+    fn from(value: T) -> Self {
+        Self::from_str(value.as_ref())
+    }
+}
 
-        let mut split = Vec::new();
-        for chunk in separated.split(['/', ',', '&', ';']) {
-            let mut cur: Vec<&str> = Vec::new();
+impl TrackArtists {
+    pub(crate) fn split(raw: &str) -> Vec<String> {
+        // normalize `w/` to `&` so we can split on `/`
+        let norm = raw.replace(" w/ ", " & ");
+
+        let mut names = Vec::new();
+        let mut cur: Vec<&str> = Vec::new();
+
+        for chunk in norm.split(['/', ',', '&', ';']) {
+            cur.clear();
 
             for word in chunk.split_whitespace() {
-                if is_marker(word, CREDIT_MARKERS) || is_marker(word, ARTIST_SEPARATORS) {
+                if contains(word, CREDIT_MARKERS) || contains(word, &["and", "vs", "vs."]) {
                     if !cur.is_empty() {
-                        split.push(cur.join(" "));
+                        names.push(cur.join(" "));
                         cur.clear();
                     }
                 } else {
@@ -395,77 +346,78 @@ impl Artists {
             }
 
             if !cur.is_empty() {
-                split.push(cur.join(" "));
+                names.push(cur.join(" "));
             }
         }
 
-        let packed = raw.trim().to_string();
-        if split.is_empty() {
-            split.push(packed.clone());
-        }
-
-        Self { packed, split }
+        names
     }
 
-    fn from_list<'a>(names: impl Iterator<Item = &'a str>) -> Self {
-        let split: Vec<String> = names.map(|s| s.to_string()).collect();
-
-        if split.is_empty() {
-            return Self {
-                packed: String::new(),
-                split: vec![String::new()],
-            };
+    pub(crate) fn from_str(raw: &str) -> Self {
+        Self {
+            joined: raw.trim().to_string(),
+            split: Self::split(raw),
         }
+    }
+
+    pub(crate) fn from_iter<'a>(names: impl Iterator<Item = &'a str>) -> Self {
+        let split: Vec<String> = names
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(String::from)
+            .collect();
 
         Self {
-            packed: split.join(" & "),
+            joined: split.join(" & "),
             split,
         }
     }
 
-    pub(crate) fn lead(&self) -> &str {
-        &self.split[0]
+    fn extend(mut self, extra: &[String]) -> Self {
+        if !extra.is_empty() {
+            self.split.extend(extra.iter().map(|s| s.to_owned()));
+        }
+        self
     }
 
-    pub(crate) fn is_various(&self) -> bool {
-        let packed = self.packed.to_lowercase();
-        packed.contains("various") || packed == "v/a" || packed == "va"
+    pub(crate) fn primary(&self) -> &str {
+        self.split.first().map(String::as_str).unwrap_or_default()
     }
 
-    /// Every form worth comparing: the field as written, each performer alone,
-    /// and an alphabetised join so a packed bandcamp string can line up with
-    /// Spotify's array whatever order the two use.
-    fn forms(&self, extra: &[String]) -> Vec<String> {
-        let mut performers: Vec<String> = self
+    // returns several permutations of the track's artist(s) for partial string
+    // comparison:
+    //
+    // * the joined/original artist string
+    // * each artist on their own
+    // * a sorted version of the joined artist string
+    fn permutations(&self) -> BTreeSet<String> {
+        let names: BTreeSet<&str> = self
             .split
             .iter()
-            .chain(extra.iter())
-            .filter(|s| !s.trim().is_empty())
-            .cloned()
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
             .collect();
 
-        let mut forms = performers.clone();
-        forms.push(self.packed.clone());
+        let mut elems: BTreeSet<String> = Default::default();
+        for name in &names {
+            elems.insert(name.to_string());
+        }
 
-        performers.sort();
-        performers.dedup();
-        forms.push(performers.join(" & "));
+        let mut elems: BTreeSet<String> = names.iter().copied().map(String::from).collect();
 
-        forms.retain(|s| !s.trim().is_empty());
-        forms.sort();
-        forms.dedup();
-        forms
+        if names.len() > 1 {
+            elems.insert(names.iter().copied().collect::<Vec<_>>().join(" & "));
+        }
+
+        if !self.joined.trim().is_empty() {
+            elems.insert(self.joined.clone());
+        }
+
+        elems
     }
 }
 
-#[derive(Debug, Clone)]
-struct TrackTitle;
-#[derive(Debug, Clone)]
-struct Artist;
-#[derive(Debug, Clone)]
-struct Album;
-
-trait MatchType {
+pub(crate) trait MatchType {
     fn label() -> &'static str {
         let ty = std::any::type_name::<Self>();
 
@@ -480,8 +432,8 @@ trait MatchType {
 }
 
 impl MatchType for TrackTitle {}
-impl MatchType for Artist {}
-impl MatchType for Album {}
+impl MatchType for model::Release {}
+impl MatchType for model::Artist {}
 
 #[derive(Debug)]
 struct StringMatcher<MT: MatchType> {
@@ -491,9 +443,9 @@ struct StringMatcher<MT: MatchType> {
 }
 
 impl<MT: MatchType> StringMatcher<MT> {
-    fn new(s: &str) -> Self {
-        let original = s.to_string();
-        let normalized = normalize(s);
+    fn new<T: Into<String>>(original: T) -> Self {
+        let original = original.into();
+        let normalized = normalize(&original);
 
         Self {
             original,
@@ -502,7 +454,7 @@ impl<MT: MatchType> StringMatcher<MT> {
         }
     }
 
-    fn score(&mut self, s: &str) -> f64 {
+    fn score(&self, s: &str) -> f64 {
         let norm = normalize(s);
 
         if self.original.eq_ignore_ascii_case(s) {
@@ -515,20 +467,16 @@ impl<MT: MatchType> StringMatcher<MT> {
             return 100.0;
         }
 
-        // the two are complementary rather than redundant: jaro covers character
-        // noise inside a token, which tokenizing destroys, and token_set covers
-        // whole-token insertion, which jaro cannot see. Both are logged because
-        // which one carried the score is the first thing you need to know.
-        let jaro = jaro(&self.normalized, &norm) * 100.0;
-        let tokens = token_set(&self.normalized, &norm) * 100.0;
-        let score = jaro.max(tokens);
+        let jaro_score = jaro(&self.normalized, &norm) * 100.0;
+        let word_score = common_words(&self.normalized, &norm) * 100.0;
+        let score = jaro_score.max(word_score);
 
         tracing::trace!(
             kind = MT::label(),
             subject = %self.normalized,
             candidate = %norm,
-            jaro,
-            token_set = tokens,
+            jaro_score,
+            word_score,
             score,
             "compared",
         );
@@ -537,97 +485,183 @@ impl<MT: MatchType> StringMatcher<MT> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct TrackNumMatcher {
-    num: usize,
-}
+mod matcher {
+    use super::*;
 
-impl TrackNumMatcher {
-    fn new(num: usize) -> Self {
-        Self { num }
+    pub type Release = StringMatcher<model::Release>;
+
+    #[derive(Debug)]
+    pub struct Artist {
+        permutations: BTreeSet<String>,
+        matchers: Vec<StringMatcher<model::Artist>>,
     }
 
-    fn score(&self, other: usize) -> f64 {
-        if self.num == other {
-            100.0
-        } else {
-            0.0
+    impl Artist {
+        pub fn new(artists: TrackArtists) -> Self {
+            let permutations = artists.permutations();
+            let mut matchers = Vec::with_capacity(permutations.len());
+            for subject in &permutations {
+                matchers.push(StringMatcher::new(subject));
+            }
+
+            Self {
+                permutations,
+                matchers,
+            }
+        }
+
+        pub fn score(&self, other: &TrackArtists) -> (f64, String) {
+            let permutations = other.permutations();
+
+            let mut best = 0f64;
+            let mut matched = permutations
+                .iter()
+                .nth(0)
+                .expect("TrackArtists.permutations() never returns an empty data set");
+
+            for matcher in &self.matchers {
+                for candidate in &permutations {
+                    let score = matcher.score(candidate);
+                    if score > best {
+                        best = score;
+                        matched = candidate;
+                    }
+                }
+            }
+
+            tracing::trace!(
+                subjects = ?self.permutations,
+                candidates = ?permutations,
+                best = ?matched,
+                score = best,
+                "compared artist forms",
+            );
+
+            (best, matched.to_owned())
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Title {
+        original: StringMatcher<TrackTitle>,
+        core: StringMatcher<TrackTitle>,
+        tags: usize,
+    }
+
+    impl Title {
+        pub fn new(title: TrackTitle) -> Self {
+            let TrackTitle {
+                original,
+                core,
+                featured: _,
+                tags,
+            } = title;
+
+            Self {
+                original: StringMatcher::new(original),
+                core: StringMatcher::new(core),
+                tags,
+            }
+        }
+
+        pub fn score(&self, other: &TrackTitle) -> f64 {
+            let core = self.core.score(other.core());
+            let original = self.original.score(&other.original);
+            core.max(original)
+        }
+
+        pub fn same_version(&self, other: &TrackTitle) -> bool {
+            self.tags == other.tags
+        }
+    }
+
+    pub(crate) trait MatchDuration {
+        fn track_max_diff(&self) -> Duration;
+        fn track_score(&self, other: Duration) -> Option<f64>;
+    }
+
+    impl MatchDuration for Duration {
+        fn track_max_diff(&self) -> Duration {
+            const LIMIT: Duration = Duration::from_secs(15);
+            const RATIO: f64 = 0.05;
+
+            LIMIT.max(self.mul_f64(RATIO))
+        }
+
+        fn track_score(&self, other: Duration) -> Option<f64> {
+            const EXACT: Duration = Duration::from_secs(2);
+
+            let diff = self.abs_diff(other);
+            let max = self.track_max_diff();
+
+            if diff <= EXACT {
+                return Some(100.0);
+            } else if diff >= max {
+                return None;
+            }
+
+            let falloff = (diff - EXACT).as_secs_f64() / (max - EXACT).as_secs_f64();
+
+            Some((1.0 - falloff) * 100.0)
+        }
+    }
+
+    pub(crate) trait MatchTrackNumber {
+        fn track_score(self, other: usize) -> f64;
+    }
+
+    impl MatchTrackNumber for usize {
+        fn track_score(self, other: usize) -> f64 {
+            if self == other { 100.0 } else { 0.0 }
         }
     }
 }
 
-#[derive(Debug, Clone)]
-struct TrackDurationMatcher {
-    duration: Duration,
-}
-
-impl TrackDurationMatcher {
-    fn new(duration: Duration) -> Self {
-        Self { duration }
-    }
-
-    /// How far a candidate may run from this track before it is a different
-    /// recording. Always wider than [`DURATION_MATCH`], so the falloff below
-    /// cannot divide by zero.
-    fn limit(&self) -> Duration {
-        DURATION_LIMIT.max(self.duration.mul_f64(DURATION_LIMIT_RATIO))
-    }
-
-    /// `None` disqualifies the candidate outright.
-    fn score(&self, other: Duration) -> Option<f64> {
-        let diff = self.duration.abs_diff(other);
-        let limit = self.limit();
-
-        if diff <= DURATION_MATCH {
-            return Some(100.0);
-        } else if diff >= limit {
-            return None;
-        }
-
-        let falloff =
-            (diff - DURATION_MATCH).as_secs_f64() / (limit - DURATION_MATCH).as_secs_f64();
-
-        Some((1.0 - falloff) * 100.0)
-    }
-}
-
+#[derive(Debug)]
 struct MatchParams {
-    title: Title,
-    artists: Artists,
+    title: TrackTitle,
+    artists: TrackArtists,
     album: String,
     number: usize,
     duration: Duration,
 }
 
-impl From<&types::SpotifyTrack> for MatchParams {
-    fn from(value: &types::SpotifyTrack) -> MatchParams {
+impl MatchParams {
+    fn new<T, A, R>(title: T, artists: A, release: R, number: usize, duration: Duration) -> Self
+    where
+        T: Into<TrackTitle>,
+        A: Into<TrackArtists>,
+        R: ToString,
+    {
+        let title = title.into();
+
+        let artists = artists.into().extend(&title.featured);
+
         Self {
-            title: Title::parse(&value.name),
-            artists: Artists::from_list(value.artists.iter().map(|a| a.name.as_str())),
-            album: value.album.name.clone(),
-            number: value.track_number as usize,
-            duration: value.duration.to_std().unwrap_or_default(),
+            title,
+            artists,
+            album: release.to_string(),
+            number,
+            duration,
         }
     }
 }
 
-impl From<&types::Track> for MatchParams {
-    fn from(value: &types::Track) -> MatchParams {
-        Self {
-            title: Title::parse(&value.title),
-            artists: Artists::parse(&value.artist.name),
-            album: value.album.title.clone(),
-            number: value.album_track_number,
-            duration: value.duration,
-        }
+impl From<&SpotifyTrack> for MatchParams {
+    fn from(value: &SpotifyTrack) -> MatchParams {
+        let artists = TrackArtists::from_iter(value.artists.iter().map(|a| a.name.as_str()));
+        Self::new(
+            &value.name,
+            artists,
+            &value.album.name,
+            value.track_number as usize,
+            value.duration.to_std().unwrap_or_default(),
+        )
     }
 }
 
-/// The verdict on one Spotify candidate. An `Option<f64>` collapsed "rejected
-/// at 94.9" into the same value as "the duration was never plausible", so a
-/// near miss worth tuning for read identically to a candidate that was junk.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Score {
+pub(crate) enum MatchResult {
     Match(f64),
     WrongVersion,
     WrongDuration(Duration),
@@ -635,7 +669,7 @@ pub(crate) enum Score {
     WrongArtist(f64),
 }
 
-impl Score {
+impl MatchResult {
     pub(crate) fn matched(&self) -> Option<f64> {
         match self {
             Self::Match(score) => Some(*score),
@@ -646,9 +680,7 @@ impl Score {
         }
     }
 
-    /// How close a rejected candidate came, so the nearest miss can be reported.
-    /// A wrong version or duration is not a near miss at any title score.
-    pub(crate) fn proximity(&self) -> f64 {
+    pub(crate) fn score(&self) -> f64 {
         match self {
             Self::Match(score) | Self::WrongTitle(score) | Self::WrongArtist(score) => *score,
             Self::WrongVersion | Self::WrongDuration(_) => 0.0,
@@ -656,7 +688,7 @@ impl Score {
     }
 }
 
-impl std::fmt::Display for Score {
+impl std::fmt::Display for MatchResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Match(score) => write!(f, "matched at {score:.1}"),
@@ -669,15 +701,12 @@ impl std::fmt::Display for Score {
 }
 
 #[derive(Debug)]
-pub(crate) struct TrackMatcher<'a> {
-    _track: &'a crate::types::Track,
-    title: Title,
-    core: StringMatcher<TrackTitle>,
-    full: StringMatcher<TrackTitle>,
-    artists: Artists,
-    album: StringMatcher<Album>,
-    number: TrackNumMatcher,
-    duration: TrackDurationMatcher,
+pub(crate) struct TrackMatcher {
+    title: matcher::Title,
+    artists: matcher::Artist,
+    album: matcher::Release,
+    number: usize,
+    duration: Duration,
 }
 
 impl<T, MT> From<T> for StringMatcher<MT>
@@ -690,82 +719,47 @@ where
     }
 }
 
-impl<'a> TrackMatcher<'a> {
-    pub(crate) fn new(track: &'a types::Track) -> anyhow::Result<TrackMatcher<'a>> {
-        let title = Title::parse(&track.title);
+impl TrackMatcher {
+    pub(crate) fn new(
+        title: &str,
+        artist: &str,
+        credited_artist: Option<&str>,
+        album: &str,
+        number: usize,
+        duration: Duration,
+    ) -> Self {
+        let title = TrackTitle::from_str(title);
 
-        Ok(Self {
-            _track: track,
-            core: StringMatcher::new(title.core()),
-            full: StringMatcher::new(&track.title),
-            title,
-            artists: Artists::parse(&track.artist.name),
-            album: StringMatcher::new(&track.album.title),
-            number: TrackNumMatcher::new(track.album_track_number),
-            duration: TrackDurationMatcher::new(track.duration),
-        })
-    }
+        let mut credited: Vec<String> =
+            credited_artist.map(TrackArtists::split).unwrap_or_default();
+        credited.extend(title.featured.iter().cloned());
 
-    /// Compare the parsed titles, but never below what the raw strings score:
-    /// parsing may only add matches, never take one away.
-    fn title_score(&mut self, result: &MatchParams) -> f64 {
-        let core = self.core.score(result.title.core());
-        let full = self.full.score(&result.title.original);
+        let artists = TrackArtists::from_str(artist).extend(&credited);
 
-        // both comparisons carry the same type label, so name them here or the
-        // two trace lines above are indistinguishable
-        tracing::trace!(core, full, "title compared parsed and as written");
-
-        core.max(full)
-    }
-
-    fn album_score(&mut self, result: &MatchParams) -> f64 {
-        self.album.score(&result.album)
-    }
-
-    /// Performers credited in either title count toward the artist match:
-    /// bandcamp writes them into the title where Spotify lists them as artists.
-    /// Returns the best score and the candidate form that earned it.
-    fn artist_score(&mut self, result: &MatchParams) -> (f64, String) {
-        let subjects = self.artists.forms(&self.title.featured);
-        let candidates = result.artists.forms(&result.title.featured);
-
-        let mut best = (0f64, String::new());
-
-        for subject in &subjects {
-            let mut matcher = StringMatcher::<Artist>::new(subject);
-
-            for candidate in &candidates {
-                let score = matcher.score(candidate);
-                if score > best.0 {
-                    best = (score, candidate.clone());
-                }
-            }
+        Self {
+            title: matcher::Title::new(title),
+            artists: matcher::Artist::new(artists),
+            album: matcher::Release::new(album),
+            number,
+            duration,
         }
-
-        tracing::trace!(
-            subjects = ?subjects,
-            candidates = ?candidates,
-            best = %best.1,
-            score = best.0,
-            "compared artist forms",
-        );
-
-        best
     }
 
-    fn track_number_score(&self, result: &MatchParams) -> f64 {
-        self.number.score(result.number)
+    pub(crate) fn from_track(track: &full::Track) -> TrackMatcher {
+        Self::new(
+            &track.track.title,
+            &track.artist.name,
+            track.track.credited_artist.as_deref(),
+            &track.release.title,
+            track.track.release_track_number as usize,
+            Duration::from_secs_f64(track.track.duration),
+        )
     }
 
-    fn duration_score(&self, result: &MatchParams) -> Option<f64> {
-        self.duration.score(result.duration)
-    }
-
-    pub(crate) fn score(&mut self, result: &SpotifyTrack) -> Score {
+    pub(crate) fn score(&self, spotify_track: &SpotifyTrack) -> MatchResult {
         let span = tracing::debug_span!(
             "candidate",
-            id = result
+            id = spotify_track
                 .id
                 .as_ref()
                 .map(|id| id.to_string())
@@ -773,15 +767,17 @@ impl<'a> TrackMatcher<'a> {
         );
         let _guard = span.enter();
 
-        self.score_params(MatchParams::from(result))
+        self.score_params(MatchParams::from(spotify_track))
     }
 
-    fn score_params(&mut self, result: MatchParams) -> Score {
-        let title = self.title_score(&result);
-        let (artist, artist_form) = self.artist_score(&result);
-        let album = self.album_score(&result);
-        let tracknum = self.track_number_score(&result);
-        let duration = self.duration_score(&result);
+    fn score_params(&self, params: MatchParams) -> MatchResult {
+        use matcher::*;
+
+        let title = self.title.score(&params.title);
+        let (artist, matched_artist) = self.artists.score(&params.artists);
+        let album = self.album.score(&params.album);
+        let tracknum = self.number.track_score(params.number);
+        let duration = self.duration.track_score(params.duration);
 
         let weighted = (title * TITLE_WEIGHT)
             + (artist * ARTIST_WEIGHT)
@@ -791,47 +787,44 @@ impl<'a> TrackMatcher<'a> {
 
         let composite = (weighted / self.max_possible() as f64) * 100.0;
 
-        // gates in the order they disqualify: a candidate rejected on version or
-        // duration never earned a meaningful title score
-        let verdict = if self.title.tags != result.title.tags {
-            Score::WrongVersion
+        let result = if !self.title.same_version(&params.title) {
+            MatchResult::WrongVersion
         } else if duration.is_none() {
-            Score::WrongDuration(self.duration.duration.abs_diff(result.duration))
+            MatchResult::WrongDuration(self.duration.abs_diff(params.duration))
         } else if title < MIN_TITLE_SCORE {
-            Score::WrongTitle(title)
+            MatchResult::WrongTitle(title)
         } else if artist < MIN_ARTIST_SCORE {
-            Score::WrongArtist(artist)
+            MatchResult::WrongArtist(artist)
         } else {
-            Score::Match(composite)
+            MatchResult::Match(composite)
         };
 
-        // to a tenth: the remaining digits are float noise, not signal
         fn round(score: f64) -> f64 {
             (score * 10.0).round() / 10.0
         }
 
         tracing::debug!(
-            cand.title = %result.title.original,
-            cand.core = %result.title.core(),
-            cand.artists = %result.artists.packed,
-            cand.album = %result.album,
-            cand.number = result.number,
-            cand.secs = result.duration.as_secs_f64(),
-            cand.tags = ?result.title.tags,
+            cand.title = %params.title.original,
+            cand.core = %params.title.core(),
+            cand.artists = %params.artists.joined,
+            cand.album = %params.album,
+            cand.number = params.number,
+            cand.secs = params.duration.as_secs_f64(),
+            cand.tags = ?params.title.tags,
             score.title = round(title),
             score.artist = round(artist),
-            score.artist_form = %artist_form,
+            score.matched_artist = %matched_artist,
             score.album = round(album),
             score.number = round(tracknum),
             score.duration = round(duration.unwrap_or_default()),
             score.composite = round(composite),
-            limit.title = MIN_TITLE_SCORE,
-            limit.artist = MIN_ARTIST_SCORE,
-            limit.duration = ?self.duration.limit(),
-            "{verdict}",
+            min_score.title = MIN_TITLE_SCORE,
+            min_score.artist = MIN_ARTIST_SCORE,
+            max_diff.duration = ?self.duration.track_max_diff(),
+            "{result}",
         );
 
-        verdict
+        result
     }
 
     fn max_possible(&self) -> u64 {
@@ -846,7 +839,51 @@ impl<'a> TrackMatcher<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::matcher::*;
     use super::*;
+
+    impl From<(&str, &str, &str)> for TrackMatcher {
+        fn from(value: (&str, &str, &str)) -> Self {
+            Self::new(value.0, value.1, None, value.2, 1, Duration::from_secs(60))
+        }
+    }
+
+    impl From<(&str, &str, &str, i32, Duration)> for TrackMatcher {
+        fn from(value: (&str, &str, &str, i32, Duration)) -> Self {
+            Self::new(value.0, value.1, None, value.2, value.3 as usize, value.4)
+        }
+    }
+
+    impl<A> From<(&str, A, &str)> for MatchParams
+    where
+        A: Into<TrackArtists>,
+    {
+        fn from(value: (&str, A, &str)) -> Self {
+            Self::new(value.0, value.1, value.2, 1, Duration::from_secs(60))
+        }
+    }
+
+    impl<A> From<(&str, A, &str, i32, Duration)> for MatchParams
+    where
+        A: Into<TrackArtists>,
+    {
+        fn from(value: (&str, A, &str, i32, Duration)) -> Self {
+            Self::new(value.0, value.1, value.2, value.3 as usize, value.4)
+        }
+    }
+
+    fn tags_to_vec(tags: usize) -> Vec<&'static str> {
+        TAGS.iter()
+            .enumerate()
+            .filter_map(|(i, t)| {
+                if tags & (1 << i) == (1 << i) {
+                    Some(*t)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 
     #[test]
     fn fuzzy_search() {
@@ -871,7 +908,7 @@ mod tests {
         for (search_result, bandcamp_title) in cases {
             // technically not all of our tests are track titles, but that
             // doesn't matter here.
-            let mut matcher: StringMatcher<TrackTitle> = StringMatcher::new(bandcamp_title);
+            let matcher: StringMatcher<TrackTitle> = StringMatcher::new(bandcamp_title);
             let result = matcher.score(search_result);
             assert!(
                 result > 0.0,
@@ -885,29 +922,25 @@ mod tests {
         assert_eq!("desiree", normalize("Desirée"));
         assert_eq!("brujula", normalize("Brújula"));
         assert_eq!("ceska reka", normalize("Česká Řeka"));
-        // stripping `Mn` at large would take the dakuten with it, turning が into か
         assert_eq!("君が目", normalize("君が目"));
     }
 
     #[test]
     fn normalize_short_titles() {
-        // these bypassed normalization entirely under the 8-byte cutoff
         assert_eq!("wake", normalize("Wake."));
         assert_eq!("head", normalize("head!"));
         assert_eq!("001", normalize("001."));
     }
 
     #[test]
-    fn token_set_scores() {
-        // whole-token insertion is free once enough words are shared
+    fn common_word_scores() {
         assert_eq!(
             1.0,
-            token_set("small white animal", "small white animal 2026 remaster")
+            common_words("small white animal", "small white animal 2026 remaster")
         );
 
-        // but one shared word must not make a one-word title match anything
-        assert!(token_set("title", "nope nope bad title") < 0.5);
-        assert!(token_set("arise", "arise to the sun") < 0.5);
+        assert!(common_words("title", "nope nope bad title") < 0.5);
+        assert!(common_words("arise", "arise to the sun") < 0.5);
     }
 
     #[test]
@@ -934,16 +967,16 @@ mod tests {
                 "You Can't Negotiate With Zombies",
                 vec![],
             ),
-            // an unclosed group is not structure, so its text stays in the core
+            // unclosed group
             ("Wake (up", "Wake up", vec![]),
-            // a title that is nothing but a tag keeps its text
+            // title that _only_ contains a tag
             ("(Instrumental)", "(Instrumental)", vec![]),
         ];
 
         for (raw, core, featured) in cases {
-            let title = Title::parse(raw);
-            assert_eq!(core, title.core(), "core of '{raw}'");
-            assert_eq!(featured, title.featured, "featured of '{raw}'");
+            let title = TrackTitle::from_str(raw);
+            assert_eq!(core, title.core(), "'{raw}' .core");
+            assert_eq!(featured, title.featured, "'{raw}' .featured");
         }
     }
 
@@ -956,14 +989,18 @@ mod tests {
             ),
             ("Takamaru (Eurlica Remix)", vec!["remix"]),
             ("What's His Name (Instrumental)", vec!["instrumental"]),
-            // a different master is the same performance
+            // we don't consider `remaster` a different version
             ("Small White Animal - 2026 Remaster", vec![]),
             ("Quartet (2022)", vec![]),
             ("Alone + Easy Target", vec![]),
         ];
 
         for (raw, tags) in cases {
-            assert_eq!(tags, Title::parse(raw).tags, "tags of '{raw}'");
+            assert_eq!(
+                tags,
+                tags_to_vec(TrackTitle::from_str(raw).tags),
+                "'{raw}' .tags"
+            );
         }
     }
 
@@ -991,140 +1028,106 @@ mod tests {
         ];
 
         for (raw, split) in cases {
-            let artists = Artists::parse(raw);
+            let artists = TrackArtists::from_str(raw);
             assert_eq!(split, artists.split, "split of '{raw}'");
-            assert_eq!(split[0], artists.lead(), "lead of '{raw}'");
+            assert_eq!(split[0], artists.primary(), "lead of '{raw}'");
         }
-
-        assert!(Artists::parse("Various Artists").is_various());
-        assert!(Artists::parse("V/A").is_various());
-        assert!(!Artists::parse("Amulets").is_various());
-    }
-
-    #[test]
-    fn title_credited_artist() {
-        assert_eq!(
-            Some(("Circadian Rhythm".to_string(), "Shela".to_string())),
-            Title::parse("Circadian Rhythm - Shela").credited_artist()
-        );
-        assert_eq!(None, Title::parse("Shela").credited_artist());
     }
 
     #[test]
     fn track_matcher_packed_artist() {
-        // bandcamp packs collaborators into one field; Spotify splits them, and
-        // credits the featured performer bandcamp left in the title
-        let track = {
-            let mut track = types::Track::new(
-                "Knew It All (Ft: Oddisee)",
-                "Von Pea & The Other Guys",
-                "album",
-            );
-            track.duration = types::Duration::from_secs(156);
-            track.album_track_number = 7;
-            track
-        };
+        let track = (
+            "Knew It All (Ft: Oddisee)",
+            "Von Pea & The Other Guys",
+            "album",
+            7,
+            Duration::from_secs(156),
+        );
 
-        let mut params = MatchParams::from(&track);
-        params.title = Title::parse("Knew It All (feat. Oddisee)");
-        params.artists = Artists::from_list(["Von Pea", "The Other Guys", "Oddisee"].into_iter());
+        let other = (
+            "Knew It All (feat. Oddisee)",
+            TrackArtists::from_iter(["Von Pea", "The Other Guys", "Oddisee"].into_iter()),
+            "album",
+            7,
+            Duration::from_secs(156),
+        );
 
-        let mut matcher = TrackMatcher::new(&track).expect("should not fail");
+        let matcher = TrackMatcher::from(track);
 
-        assert_eq!(Score::Match(100.0), matcher.score_params(params));
+        assert_eq!(
+            MatchResult::Match(100.0),
+            matcher.score_params(other.into())
+        );
     }
 
     #[test]
     fn track_matcher_rejects_other_version() {
-        // a live take and the studio recording share a title and often a runtime
-        let track = {
-            let mut track = types::Track::new("Alone (Live in Berlin)", "artist", "album");
-            track.duration = types::Duration::from_secs(240);
-            track.album_track_number = 4;
-            track
-        };
+        let track = (
+            "Alone (Live in Berlin)",
+            "artist",
+            "album",
+            4,
+            Duration::from_secs(240),
+        );
 
-        let mut params = MatchParams::from(&track);
-        params.title = Title::parse("Alone");
+        let other = ("Alone", "artist", "album", 4, Duration::from_secs(240));
 
-        let mut matcher = TrackMatcher::new(&track).expect("should not fail");
+        let matcher = TrackMatcher::from(track);
 
-        assert_eq!(Score::WrongVersion, matcher.score_params(params));
+        assert_eq!(
+            MatchResult::WrongVersion,
+            matcher.score_params(other.into())
+        );
     }
 
     #[test]
     fn track_matcher_exact() {
-        let track = {
-            let mut track = types::Track::new("track", "artist", "album");
-            track.duration = types::Duration::from_secs(30);
-            track.album_track_number = 2;
-            track
-        };
+        let track = ("track", "artist", "album", 2, Duration::from_secs(30));
 
-        let mut matcher = TrackMatcher::new(&track).expect("should not fail");
+        let matcher = TrackMatcher::from(track);
 
-        let score = matcher.score_params((&track).into());
+        let score = matcher.score_params(track.into());
 
-        assert_eq!(Score::Match(100.0), score);
+        assert_eq!(MatchResult::Match(100.0), score);
     }
 
     #[test]
     fn track_matcher_similar_title() {
-        let track = {
-            let mut track = types::Track::new("my track name!!", "artist", "album");
-            track.duration = types::Duration::from_secs(30);
-            track.album_track_number = 2;
-            track
-        };
+        let track = ("my track name!!", "artist", "album");
 
-        let other = {
-            let mut other = track.clone();
-            other.title = format!("{}!", other.title);
-            other
-        };
+        let alt = format!("{}!", track.0);
+        let other = (alt.as_str(), "artist", "album");
 
-        let mut matcher = TrackMatcher::new(&track).expect("should not fail");
+        let matcher = TrackMatcher::from(track);
 
-        let score = matcher.score_params((&other).into());
-
-        // both titles normalize to "my track name": every trailing `!` is
-        // stripped, not just the last one
-        assert_eq!(Score::Match(100.0), score);
+        let score = matcher.score_params(other.into());
+        assert_eq!(MatchResult::Match(100.0), score);
     }
 
     #[test]
     fn track_matcher_wrong_title() {
-        let track = {
-            let mut track = types::Track::new("title", "artist", "album");
-            track.duration = types::Duration::from_secs(30);
-            track.album_track_number = 2;
-            track
-        };
+        let track = ("title", "artist", "album");
 
-        let other = {
-            let mut other = track.clone();
-            other.title = "nope nope bad title".to_string();
-            other
-        };
+        let params = MatchParams::from(("nope nope bad title", "artist", "album"));
 
-        let mut matcher = TrackMatcher::new(&track).expect("should not fail");
+        let matcher = TrackMatcher::from(track);
 
-        let score = matcher.score_params((&other).into());
+        let score = matcher.score_params(params);
 
         assert!(
-            matches!(score, Score::WrongTitle(_)),
+            matches!(score, MatchResult::WrongTitle(_)),
             "expected a title rejection, got {score:?}"
         );
     }
 
     #[test]
-    fn duration_matcher() {
-        let matcher = TrackDurationMatcher::new(types::Duration::from_secs(180));
+    fn duration_match() {
+        let matcher = Duration::from_secs(180);
 
         for secs in [178, 179, 180, 181, 182] {
             assert_eq!(
                 Some(100.0),
-                matcher.score(types::Duration::from_secs(secs)),
+                matcher.track_score(Duration::from_secs(secs)),
                 "{secs}s should be indistinguishable from 180s"
             );
         }
@@ -1132,16 +1135,16 @@ mod tests {
         for secs in [0, 90, 195, 240, 360] {
             assert_eq!(
                 None,
-                matcher.score(types::Duration::from_secs(secs)),
+                matcher.track_score(Duration::from_secs(secs)),
                 "{secs}s should be disqualified"
             );
         }
 
         let near = matcher
-            .score(types::Duration::from_secs(185))
+            .track_score(Duration::from_secs(185))
             .expect("185s is inside the limit");
         let far = matcher
-            .score(types::Duration::from_secs(192))
+            .track_score(Duration::from_secs(192))
             .expect("192s is inside the limit");
 
         assert!(near > far, "185s ({near}) should outrank 192s ({far})");
@@ -1149,71 +1152,57 @@ mod tests {
 
     #[test]
     fn duration_matcher_scales_with_length() {
-        // 15s is a sixth of a 90s track, so short tracks keep the flat floor
-        let short = TrackDurationMatcher::new(types::Duration::from_secs(90));
-        assert_eq!(types::Duration::from_secs(15), short.limit());
+        let short = Duration::from_secs(90);
+        assert_eq!(Duration::from_secs(15), short.track_max_diff());
 
-        // ...but it is 1% of a twenty-minute piece, where masters drift further
-        let long = TrackDurationMatcher::new(types::Duration::from_secs(1200));
-        assert_eq!(types::Duration::from_secs(60), long.limit());
+        let long = Duration::from_secs(1200);
+        assert_eq!(Duration::from_secs(60), long.track_max_diff());
 
         assert!(
-            long.score(types::Duration::from_secs(1250)).is_some(),
+            long.track_score(Duration::from_secs(1250)).is_some(),
             "50s off a 20 minute track is within 5%"
         );
         assert_eq!(
             None,
-            long.score(types::Duration::from_secs(1270)),
+            long.track_score(Duration::from_secs(1270)),
             "70s off a 20 minute track is not"
         );
     }
 
     #[test]
     fn track_matcher_wrong_duration() {
-        let track = {
-            let mut track = types::Track::new("title", "artist", "album");
-            track.duration = types::Duration::from_secs(180);
-            track.album_track_number = 2;
-            track
-        };
+        let track = ("title", "artist", "album", 2, Duration::from_secs(180));
 
-        let other = {
-            let mut other = track.clone();
-            other.duration = types::Duration::from_secs(240);
-            other
-        };
+        let other = ("title", "artist", "album", 2, Duration::from_secs(240));
 
-        let mut matcher = TrackMatcher::new(&track).expect("should not fail");
+        let matcher = TrackMatcher::from(track);
 
-        let score = matcher.score_params((&other).into());
+        let score = matcher.score_params(other.into());
 
         assert!(
-            matches!(score, Score::WrongDuration(_)),
+            matches!(score, MatchResult::WrongDuration(_)),
             "expected a duration rejection, got {score:?}"
         );
     }
 
     #[test]
     fn track_matcher_wrong_artist() {
-        let track = {
-            let mut track = types::Track::new("title", "artist", "album");
-            track.duration = types::Duration::from_secs(30);
-            track.album_track_number = 2;
-            track
-        };
+        let track = ("title", "artist", "album", 2, Duration::from_secs(30));
 
-        let other = {
-            let mut other = track.clone();
-            other.artist = types::Artist::new("nope not the right artist");
-            other
-        };
+        let other = (
+            "title",
+            "nope not the right artist",
+            "album",
+            2,
+            Duration::from_secs(30),
+        );
 
-        let mut matcher = TrackMatcher::new(&track).expect("should not fail");
+        let matcher = TrackMatcher::from(track);
 
-        let score = matcher.score_params((&other).into());
+        let score = matcher.score_params(other.into());
 
         assert!(
-            matches!(score, Score::WrongArtist(_)),
+            matches!(score, MatchResult::WrongArtist(_)),
             "expected an artist rejection, got {score:?}"
         );
     }
@@ -1231,22 +1220,21 @@ mod tests {
         ];
 
         for case in tests {
-            let track = {
-                let mut track = types::Track::new("title", case.0, "album");
-                track.duration = types::Duration::from_secs(30);
-                track.album_track_number = 2;
-                track
-            };
+            let track = ("title", case.0, "album", 2, Duration::from_secs(30));
 
-            let mut params = MatchParams::from(&track);
-            params.artists = Artists::from_list(case.1.iter().copied());
+            let other = (
+                track.0,
+                TrackArtists::from_iter(case.1.iter().copied()),
+                track.2,
+                track.3,
+                track.4,
+            );
 
-            let mut matcher = TrackMatcher::new(&track).expect("should not fail");
-
-            let score = matcher.score_params(params);
+            let matcher = TrackMatcher::from(track);
+            let score = matcher.score_params(other.into());
 
             assert_eq!(
-                Score::Match(100.0),
+                MatchResult::Match(100.0),
                 score,
                 "track: '{}', result: '{:?}'",
                 case.0,

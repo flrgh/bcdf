@@ -1,15 +1,18 @@
+use std::collections::HashSet;
+use std::ops::Deref as _;
+
 use anyhow::Context;
 use futures::stream::TryStreamExt;
-use rspotify::model::{
-    Country, Market, PlayableId, PlaylistId, SearchResult, SearchType, TrackId, UserId,
+use rspotify::{
+    AuthCodeSpotify, ClientError, Credentials,
+    http::HttpError,
+    model::{Country, Market, PlaylistId, SearchResult, SearchType, TrackId, UserId},
+    prelude::*,
 };
-use rspotify::prelude::*;
-use rspotify::{AuthCodeSpotify, Credentials};
 
+use crate::db::{CustomQueries as _, Db, entity, full, model, traits::SpotifyPlaylistId};
 use crate::metrics;
-use crate::search::{Artists, Score, Title, TrackMatcher};
-use crate::store::Store;
-use crate::types::{self, BlogPost, SpotifyPlaylist};
+use crate::search::{MatchResult, TrackArtists, TrackMatcher, TrackTitle};
 
 #[derive(Debug)]
 pub(crate) struct Client {
@@ -18,6 +21,77 @@ pub(crate) struct Client {
 }
 
 const MARKET: Market = Market::Country(Country::UnitedStates);
+
+trait Is404 {
+    fn is_404(&self) -> bool;
+}
+
+impl Is404 for ClientError {
+    fn is_404(&self) -> bool {
+        if let ClientError::Http(err) = self
+            && let HttpError::StatusCode(res) = err.deref()
+        {
+            return res.status().as_u16() == 404;
+        };
+
+        false
+    }
+}
+
+async fn inspect_client_error(e: ClientError) -> anyhow::Error {
+    match e {
+        ClientError::Http(err) => match *err {
+            HttpError::StatusCode(res) => {
+                let span = tracing::span!(tracing::Level::ERROR, "rspotify response");
+                let _guard = span.enter();
+
+                tracing::error!(
+                    url = %res.url(),
+                    status = %res.status().as_u16(),
+                    reason = %(res.status().canonical_reason().unwrap_or("unknown")),
+                    "request returned non-2xx status code",
+                );
+
+                for (name, value) in res.headers().into_iter() {
+                    if let Ok(s) = value.to_str() {
+                        tracing::debug!(header = %name, value = s);
+                    } else {
+                        tracing::debug!(header = %name, value = ?value);
+                    }
+                }
+
+                if let Ok(bytes) = res.bytes().await {
+                    if let Ok(pretty) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                        .and_then(|value| serde_json::to_string_pretty(&value))
+                    {
+                        tracing::debug!("response.json" = pretty);
+                    } else {
+                        tracing::debug!("response.bytes" = ?bytes);
+                    }
+                };
+
+                anyhow::anyhow!("request returned non-2xx status code")
+            }
+            HttpError::Client(error) => anyhow::anyhow!(error),
+        },
+        _ => anyhow::anyhow!(e),
+    }
+}
+
+trait InspectClientError<T, E> {
+    async fn inspect_client_error(self) -> anyhow::Result<T, E>;
+}
+
+impl<T: Send + Sync + Sized> InspectClientError<T, anyhow::Error>
+    for anyhow::Result<T, ClientError>
+{
+    async fn inspect_client_error(self) -> anyhow::Result<T> {
+        match self {
+            Ok(t) => Ok(t),
+            Err(e) => Err(inspect_client_error(e).await),
+        }
+    }
+}
 
 pub(crate) async fn connect() -> anyhow::Result<Client> {
     let config = rspotify::Config {
@@ -57,48 +131,75 @@ pub(crate) async fn connect() -> anyhow::Result<Client> {
     Ok(Client { spotify, user })
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+struct TrackQuery {
+    title: String,
+    artist: Option<String>,
+}
+
+impl From<&str> for TrackQuery {
+    fn from(value: &str) -> Self {
+        Self {
+            title: value.to_owned(),
+            artist: None,
+        }
+    }
+}
+
+impl From<&String> for TrackQuery {
+    fn from(value: &String) -> Self {
+        Self {
+            title: value.to_owned(),
+            artist: None,
+        }
+    }
+}
+
+impl From<String> for TrackQuery {
+    fn from(value: String) -> Self {
+        Self {
+            title: value,
+            artist: None,
+        }
+    }
+}
+
+impl<T1, T2> From<(T1, T2)> for TrackQuery
+where
+    T1: AsRef<str>,
+    T2: AsRef<str>,
+{
+    fn from(value: (T1, T2)) -> Self {
+        let (title, artist) = (value.0.as_ref(), value.1.as_ref());
+        Self {
+            title: title.to_owned(),
+            artist: Some(artist.to_owned()),
+        }
+    }
+}
+
 impl Client {
-    pub(crate) async fn get_or_create_playlist(
+    pub(crate) async fn get_playlist<T: SpotifyPlaylistId>(
         &self,
-        store: &Store,
-        post: &mut BlogPost,
-    ) -> anyhow::Result<()> {
-        if !post.has_spotify_tracks() {
-            tracing::debug!(title = post.title, "no spotify tracks found for playlist");
-            return Ok(());
+        t: &T,
+    ) -> anyhow::Result<Option<rspotify::model::FullPlaylist>, ClientError> {
+        let id = t.playlist_id();
+        match self.spotify.playlist(id, None, Some(MARKET)).await {
+            Ok(pl) => Ok(Some(pl)),
+            Err(e) if e.is_404() => Ok(None),
+            Err(e) => Err(e),
         }
+    }
 
-        if post.spotify_playlist.is_some() {
-            tracing::debug!(
-                title = post.title,
-                "no action needed: playlist already created"
-            );
-            return Ok(());
-        }
+    pub(crate) async fn create_playlist(
+        &self,
+        db: &Db,
+        post: &model::Post,
+    ) -> anyhow::Result<model::Playlist> {
+        let name = post.playlist_name();
 
-        let name = format!(
-            "Bandcamp - {} - {}",
-            post.published.format("%Y-%m-%d"),
-            post.title
-        );
+        tracing::debug!("creating playlist: {name}");
 
-        tracing::debug!(name, "searching for playlist");
-
-        let mut res = self.spotify.current_user_playlists();
-        while let Some(pl) = res.try_next().await.context("fetching user playlists")? {
-            if pl.name == name {
-                tracing::debug!(id = ?&pl.id, "found existing playlist");
-                let playlist = SpotifyPlaylist {
-                    id: pl.id.to_string(),
-                    name,
-                };
-                store.upsert_spotify_playlist(&post.url, &playlist)?;
-                post.spotify_playlist = Some(playlist);
-                return Ok(());
-            }
-        }
-
-        tracing::debug!("creating new playlist");
         let pl = self
             .spotify
             .user_playlist_create(
@@ -111,26 +212,22 @@ impl Client {
             .await
             .context("creating playlist")?;
 
-        let playlist = SpotifyPlaylist {
-            id: pl.id.to_string(),
-            name,
-        };
-        store.upsert_spotify_playlist(&post.url, &playlist)?;
-        post.spotify_playlist = Some(playlist);
+        let created = db.upsert_playlist(&post.url, pl.id.id(), &pl.name).await?;
 
         metrics::inc(metrics::SpotifyPlaylistsCreated, 1);
 
-        Ok(())
+        Ok(created)
     }
 
     async fn do_search(
         &self,
-        track_title: &str,
-        artist: Option<&str>,
+        query: TrackQuery,
     ) -> anyhow::Result<Vec<rspotify::model::FullTrack>> {
+        let TrackQuery { title, artist } = query;
+
         let query = match artist {
-            Some(artist) => format!("track:{track_title} artist:{artist}"),
-            None => format!("track:{track_title}"),
+            Some(artist) => format!("track:{title} artist:{artist}"),
+            None => format!("track:{title}"),
         };
 
         metrics::inc(metrics::SpotifyTrackSearchQueries, 1);
@@ -146,14 +243,12 @@ impl Client {
                 None,
             )
             .await
-            .with_context(|| format!("searching track: {}", track_title))?;
+            .with_context(|| format!("searching track: {}", title))?;
 
         let SearchResult::Tracks(tracks) = result else {
             anyhow::bail!("unexpected track search results");
         };
 
-        // the query verbatim, because that is what you paste at the API to
-        // reproduce a bad result
         tracing::debug!(
             query = %query,
             results = tracks.items.len(),
@@ -163,97 +258,86 @@ impl Client {
         Ok(tracks.items)
     }
 
-    /// Queries to try in order, stopping at the first that yields a candidate the
-    /// matcher accepts. Spotify indexes a track under its bare title, so the
-    /// credits bandcamp packs into the title have to come out before asking.
-    fn query_attempts(track: &types::Track) -> Vec<(String, Option<String>)> {
-        let title = Title::parse(&track.title);
-        let artists = Artists::parse(&track.artist.name);
-        let album_artists = Artists::parse(&track.album_artist.name);
-
-        let mut attempts = Vec::new();
-
-        if artists.is_various() {
-            if let Some((artist, core)) = title.credited_artist() {
-                attempts.push((core, Some(artist)));
-            }
-        }
-
-        attempts.push((title.core().to_string(), Some(artists.lead().to_string())));
-        attempts.push((
-            title.core().to_string(),
-            Some(album_artists.lead().to_string()),
-        ));
-        attempts.push((track.title.clone(), Some(artists.lead().to_string())));
-        attempts.push((title.core().to_string(), None));
-
-        let mut seen = std::collections::HashSet::new();
-        attempts.retain(|attempt| seen.insert(attempt.clone()));
-
-        attempts
-    }
-
     #[tracing::instrument(
         skip_all,
         fields(
-            track = %track.title,
+            track = %track.track.title,
             artist = %track.artist.name,
-            album = %track.album.title,
-            secs = track.duration.as_secs_f64(),
+            album = %track.release.title,
+            secs = track.track.duration,
         )
     )]
-    pub(crate) async fn search(&self, track: &mut types::Track) -> anyhow::Result<()> {
-        if track.spotify_id.is_some() {
-            return Ok(());
+    pub(crate) async fn search(
+        &self,
+        track: &full::Track,
+    ) -> anyhow::Result<Option<(String, f64)>> {
+        fn track_queries(track: &model::Track, artist: &model::Artist) -> Vec<TrackQuery> {
+            let title = TrackTitle::from_str(&track.title);
+            let artists = TrackArtists::from_str(&artist.name);
+
+            let mut queries = Vec::with_capacity(4);
+            let mut seen = HashSet::new();
+            let mut push = |elem: TrackQuery| {
+                if !seen.contains(&elem) {
+                    seen.insert(elem.clone());
+                    queries.push(elem);
+                }
+            };
+
+            if let Some(credited_artist) = &track.credited_artist {
+                push((title.core(), credited_artist).into());
+            }
+
+            push((title.core(), artists.primary()).into());
+            push((&track.title, artists.primary()).into());
+            push(title.core().into());
+
+            queries
         }
 
-        let mut tm = TrackMatcher::new(track)?;
-        let mut seen = 0usize;
-        let mut nearest: Option<Score> = None;
-        let attempts = Self::query_attempts(track);
+        let tm = TrackMatcher::from_track(track);
+        let mut seen = 0;
+        let mut nearest: Option<MatchResult> = None;
 
-        tracing::debug!(attempts = attempts.len(), "planned queries");
+        let queries = track_queries(&track.track, &track.artist);
+        for (attempt, query) in queries.into_iter().enumerate() {
+            let results = self.do_search(query).await?;
+            let num_results = results.len();
+            seen += num_results;
 
-        for (attempt, (title, artist)) in attempts.into_iter().enumerate() {
-            let results = self.do_search(&title, artist.as_deref()).await?;
-            seen += results.len();
-
-            // scoring is synchronous, so entering the span here cannot leak into
-            // another task the way holding one across an await would
-            let span = tracing::debug_span!("attempt", n = attempt, results = results.len());
+            let span = tracing::debug_span!("attempt", n = attempt, results = num_results);
             let _guard = span.enter();
 
             let mut matched = Vec::new();
+            for result in results {
+                let Some(id) = &result.id else {
+                    tracing::debug!("skipping search result with no track id");
+                    continue;
+                };
 
-            for result in &results {
-                let score = tm.score(result);
+                let res = tm.score(&result);
 
-                if let Some(score) = score.matched() {
-                    matched.push((score, result));
+                if let Some(score) = res.matched() {
+                    let id = id.clone();
+                    matched.push((score, result, id));
                     continue;
                 }
 
-                let closer = match &nearest {
-                    Some(current) => score.proximity() > current.proximity(),
-                    None => true,
-                };
-
-                if closer {
-                    nearest = Some(score);
+                if nearest
+                    .as_ref()
+                    .is_none_or(|prev| res.score() > prev.score())
+                {
+                    nearest.replace(res);
                 }
             }
 
             let best = matched
                 .into_iter()
-                .max_by(|(score_a, _), (score_b, _)| score_a.total_cmp(score_b));
+                .max_by(|(score_a, _, _), (score_b, _, _)| score_a.total_cmp(score_b));
 
-            let Some((score, best)) = best else {
-                tracing::debug!(candidates = results.len(), "no candidate passed the gates");
+            let Some((score, best, id)) = best else {
+                tracing::debug!(candidates = num_results, "no candidate was a match");
                 continue;
-            };
-
-            let Some(ref id) = best.id else {
-                anyhow::bail!("Track: {best:?} does not have an ID");
             };
 
             let id = id.to_string();
@@ -270,12 +354,9 @@ impl Client {
                 "matched",
             );
 
-            track.spotify_id = Some(id);
-            track.spotify_match_score = Some(score);
-
             metrics::inc(metrics::TracksDiscoveredOnSpotify, 1);
 
-            return Ok(());
+            return Ok(Some((id, score)));
         }
 
         match nearest {
@@ -283,107 +364,236 @@ impl Client {
             None => tracing::info!(results = seen, "no match: Spotify returned nothing"),
         }
 
+        Ok(None)
+    }
+
+    pub(crate) async fn match_tracks(&self, db: &Db, data: &mut full::Post) -> anyhow::Result<()> {
+        for post_track in data.tracks.iter_mut() {
+            let track = &mut post_track.track;
+            if track.track.spotify_id.is_some() {
+                continue;
+            }
+
+            match self.search(track).await.context("searching track") {
+                Err(e) => {
+                    tracing::error!(
+                        track = %track.track.title,
+                        artist = %track.artist.name,
+                        error = ?e,
+                        "failed to search track",
+                    );
+                    metrics::inc(metrics::SpotifyErrors, 1);
+                }
+                Ok(None) => {
+                    metrics::inc(metrics::TracksMissingFromSpotify, 1);
+                }
+                Ok(Some((id, score))) => {
+                    track.track.spotify_id = Some(id);
+                    track.track.spotify_match_score = Some(score);
+                    track.track = db.update_track(&track.track).await?;
+                }
+            };
+        }
+
         Ok(())
     }
 
-    pub(crate) async fn exec(&self, store: &Store, post: &mut BlogPost) -> anyhow::Result<()> {
-        let url = post.url.clone();
+    async fn delete_playlist(
+        &self,
+        db: &Db,
+        pl: model::Playlist,
+        tracks: &mut [full::PostTrack],
+    ) -> anyhow::Result<()> {
+        for track in tracks.iter_mut() {
+            track.post_track.spotify_playlist_id = None;
 
-        for track in post.tracks.iter_mut() {
-            if let Err(e) = self.search(track).await.context("searching track") {
-                tracing::error!(
-                    track = %track.title,
-                    artist = %track.artist.name,
-                    error = ?e,
-                    "failed to search track",
-                );
-                metrics::inc(metrics::SpotifyErrors, 1);
-            };
-
-            match track.spotify_id {
-                None => metrics::inc(metrics::TracksMissingFromSpotify, 1),
-                Some(_) => store.update_track_spotify(&url, track)?,
+            match db.update_post_track(&track.post_track).await {
+                Ok(pt) => track.post_track = pt,
+                Err(e) => {
+                    tracing::warn!("failed updating post track: {e}");
+                }
             }
         }
 
-        self.get_or_create_playlist(store, post).await?;
-        self.add_tracks_to_playlist(store, post).await?;
+        let db_res = entity::Playlist::delete_by_post_url(&pl.post_url)
+            .exec(db)
+            .await
+            .context("deleting playlist from the database");
+
+        if let Err(e) = self.spotify.library_remove([pl.library_id()]).await {
+            tracing::error!(
+                "failed deleting post {} playlist ({}) from spotify: {}",
+                &pl.post_url,
+                &pl.id,
+                e,
+            );
+        };
+
+        let _ = db_res?;
 
         Ok(())
     }
 
-    async fn add_tracks_to_playlist(
+    pub(crate) async fn update_post_playlist(
         &self,
-        store: &Store,
-        post: &mut BlogPost,
+        db: &Db,
+        data: &mut full::Post,
     ) -> anyhow::Result<()> {
-        if !post.needs_playlist_assignments() {
-            return Ok(());
+        let has_spotify_tracks = data
+            .tracks
+            .iter()
+            .any(|t| t.track.track.spotify_id.is_some());
+
+        if !has_spotify_tracks {
+            let Some(pl) = data.playlist.take() else {
+                return Ok(());
+            };
+
+            tracing::info!(
+                "post {} has no spotify tracks--deleting orphaned playlist {}",
+                &data.post.url,
+                &pl.id
+            );
+
+            return self.delete_playlist(db, pl, &mut data.tracks).await;
         }
 
-        let Some(playlist) = &post.spotify_playlist else {
-            return Ok(());
+        let pl = match &mut data.playlist {
+            Some(pl) => {
+                let exp_name = data.post.playlist_name();
+
+                if pl.name != exp_name {
+                    tracing::info!(
+                        "renaming post {} playlist '{}' -> '{}'",
+                        &data.post.url,
+                        &pl.name,
+                        &exp_name
+                    );
+                    if let Err(e) = self
+                        .spotify
+                        .playlist_change_detail(
+                            pl.spotify_playlist_id(),
+                            Some(&exp_name),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                    {
+                        if e.is_404() {
+                            tracing::warn!(
+                                "post {} playlist ({}) has been deleted",
+                                &data.post.url,
+                                &pl.id
+                            );
+                            return Ok(());
+                        }
+
+                        anyhow::bail!(e);
+                    }
+
+                    let _ = db.upsert_playlist(&pl.post_url, &pl.id, &exp_name).await?;
+                    pl.name = exp_name;
+                }
+
+                pl
+            }
+            None => {
+                let pl = self.create_playlist(db, &data.post).await?;
+                data.playlist.insert(pl)
+            }
         };
 
-        let plid = PlaylistId::from_id_or_uri(&playlist.id)?;
+        self.update_playlist_tracks(db, pl, &mut data.tracks)
+            .await?;
 
-        let mut current_ids = std::collections::HashSet::new();
-        let mut res = self
-            .spotify
-            .playlist_items(plid.clone(), None, Some(MARKET));
+        Ok(())
+    }
 
-        while let Some(item) = res.try_next().await.context("fetching playlist track")? {
-            let Some(track) = item.item else {
-                continue;
-            };
+    async fn update_playlist_tracks(
+        &self,
+        db: &Db,
+        playlist: &model::Playlist,
+        tracks: &mut [full::PostTrack],
+    ) -> anyhow::Result<()> {
+        let post_url = &playlist.post_url;
+        let plid = playlist.spotify_playlist_id();
 
-            let Some(track_id) = track.id() else {
-                continue;
-            };
+        let local_items: Vec<_> = tracks
+            .iter()
+            .filter_map(|t| t.spotify_playable_id())
+            .collect();
 
-            current_ids.insert(track_id.uri());
-        }
+        let remote_items = {
+            let mut remote_items = vec![];
 
-        let url = post.url.clone();
+            let mut playlist_tracks = self
+                .spotify
+                .playlist_items(plid.clone(), None, Some(MARKET));
 
-        let mut add = vec![];
-        for track in post.tracks.iter_mut() {
-            let Some(ref spid) = track.spotify_id else {
-                continue;
-            };
+            loop {
+                match playlist_tracks.try_next().await {
+                    Ok(Some(item)) => {
+                        let Some(item) = item.item else {
+                            continue;
+                        };
 
-            if let Some(ref track_pl_id) = track.spotify_playlist_id {
-                if *track_pl_id == *playlist.id {
-                    continue;
-                } else {
-                    tracing::warn!("that's weird... this track has a playlist id ({}), but it doesn't match the playlist we want to add it to ({})", track_pl_id, playlist.id);
+                        let Some(id) = item.id() else {
+                            continue;
+                        };
+
+                        remote_items.push(id.into_static());
+                    }
+                    Ok(None) => break,
+                    Err(e) if e.is_404() => {
+                        // TODO: need better handling of this...
+                        tracing::warn!("playlist ({plid}) for post {post_url} has been deleted");
+                        return Ok(());
+                    }
+                    Err(e) => anyhow::bail!(e),
                 }
             }
 
-            if current_ids.contains(spid) {
-                track.spotify_playlist_id = Some(plid.to_string());
-                store.update_track_spotify(&url, track)?;
-                continue;
-            }
+            remote_items
+        };
 
-            add.push(PlayableId::Track(TrackId::from_id_or_uri(spid)?));
+        if local_items == remote_items {
+            tracing::debug!("no updates needed to post {post_url} playlist ({plid})",);
+            return Ok(());
         }
 
-        if !add.is_empty() {
-            let num_tracks = add.len();
+        let num_tracks = local_items.len();
 
-            self.spotify
-                .playlist_add_items(plid.clone(), add, None)
-                .await
-                .context("adding playlist items")?;
+        tracing::info!("updating post {post_url} playlist ({plid}) with {num_tracks} items");
 
-            metrics::inc(metrics::TracksAddedToSpotifyPlaylist, num_tracks);
+        if let Err(e) = self
+            .spotify
+            .playlist_replace_items(plid.clone(), local_items)
+            .await
+        {
+            for track in tracks.iter_mut() {
+                track.post_track.spotify_playlist_id = None;
+                if let Ok(pt) = db.update_post_track(&track.post_track).await {
+                    track.post_track = pt;
+                }
+            }
 
-            // only recorded once Spotify has actually accepted them
-            for track in post.tracks.iter_mut() {
-                if track.spotify_id.is_some() && track.spotify_playlist_id.is_none() {
-                    track.spotify_playlist_id = Some(plid.to_string());
-                    store.update_track_spotify(&url, track)?;
+            anyhow::bail!("failed updating post {post_url} playlist {plid}: {e}",);
+        };
+
+        metrics::inc(metrics::TracksAddedToSpotifyPlaylist, num_tracks);
+
+        for track in tracks.iter_mut() {
+            track.post_track.spotify_playlist_id = if track.track.track.spotify_id.is_some() {
+                Some(playlist.id.to_string())
+            } else {
+                None
+            };
+
+            match db.update_post_track(&track.post_track).await {
+                Ok(pt) => track.post_track = pt,
+                Err(e) => {
+                    tracing::warn!("failed updating post track: {e}");
                 }
             }
         }
@@ -400,7 +610,7 @@ pub(crate) struct Cli {
 }
 
 impl Cli {
-    pub(crate) async fn exec(self, _store: &Store) -> anyhow::Result<()> {
+    pub(crate) async fn exec(self) -> anyhow::Result<()> {
         match self.command {
             Command::Track { id } => {
                 let client = connect().await?;
@@ -418,11 +628,13 @@ impl Cli {
             Command::Playlist { query } => {
                 let client = connect().await?;
                 let playlist = match query {
-                    PlaylistQuery::Id(playlist_id) => {
-                        client.spotify.playlist(playlist_id, None, Some(MARKET))
-                    }
-                }
-                .await?;
+                    PlaylistQuery::Id(id) => client
+                        .get_playlist(&id)
+                        .await
+                        .inspect_client_error()
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("playlist not found"))?,
+                };
 
                 let mut out = std::io::stdout().lock();
                 serde_json::to_writer_pretty(&mut out, &serde_json::json!(playlist))?;
@@ -431,7 +643,7 @@ impl Cli {
 
             Command::Search { title, artist } => {
                 let client = connect().await?;
-                let tracks = client.do_search(&title, artist.as_deref()).await?;
+                let tracks = client.do_search(TrackQuery { title, artist }).await?;
                 let mut out = std::io::stdout().lock();
                 serde_json::to_writer_pretty(&mut out, &serde_json::json!(tracks))?;
                 println!()

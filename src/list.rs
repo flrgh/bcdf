@@ -1,10 +1,13 @@
-use crate::types::DateTime;
 use anyhow::anyhow;
 use chrono::{Local, Months, NaiveDate, TimeDelta, Utc};
-use comfy_table::presets::UTF8_FULL_CONDENSED;
-use comfy_table::{CellAlignment, ColumnConstraint, ContentArrangement, Table};
+use comfy_table::{
+    CellAlignment, ColumnConstraint, ContentArrangement, Table, presets::UTF8_FULL_CONDENSED,
+};
 use interim::{Dialect, Interval};
 use std::str::FromStr;
+
+use crate::db;
+use crate::types::DateTime;
 
 /// `ls` options
 #[derive(clap::Args, Debug)]
@@ -23,26 +26,34 @@ pub(crate) struct Filters {
 }
 
 impl Filters {
-    pub(crate) fn published_at(&self, published: &DateTime) -> bool {
-        if let Some(since) = &self.since {
-            if *published < since.start() {
-                return false;
-            }
-        }
-
-        if let Some(until) = &self.until {
-            if *published > until.end() {
-                return false;
-            }
-        }
-
-        true
+    pub(crate) fn apply_timespec<Q, C>(&self, q: Q, c: C) -> Q
+    where
+        Q: db::QueryTrait + db::QueryFilter,
+        C: db::ColumnTrait,
+    {
+        q.filter(
+            db::Condition::all()
+                .add_option(self.since_cond(c))
+                .add_option(self.until_cond(c)),
+        )
     }
 
-    pub(crate) fn limit_results<T>(&self, rows: &mut Vec<T>) {
-        if let Some(limit) = self.limit {
-            rows.truncate(limit);
-        }
+    pub(crate) fn since_cond<C>(&self, c: C) -> Option<db::Expr>
+    where
+        C: db::ColumnTrait,
+    {
+        self.since.as_ref().map(|since| c.gte(since.start()))
+    }
+
+    pub(crate) fn until_cond<C>(&self, c: C) -> Option<db::Expr>
+    where
+        C: db::ColumnTrait,
+    {
+        self.until.as_ref().map(|until| c.lte(until.end()))
+    }
+
+    pub(crate) fn limit(&self) -> Option<u64> {
+        self.limit.map(|n| n as u64)
     }
 }
 
@@ -88,7 +99,7 @@ where
 }
 
 /// Spotify ids are `spotify:<kind>:<id>`; only the trailing id carries information.
-pub(crate) fn short_id(id: &str) -> &str {
+pub(crate) fn short_spotify_id(id: &str) -> &str {
     match id.rsplit_once(':') {
         Some((_, id)) => id,
         None => id,

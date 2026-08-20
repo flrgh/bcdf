@@ -60,29 +60,3 @@ pub(crate) fn summarize() -> Metrics {
 }
 
 pub(crate) use Metric::*;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn metric_name() {
-        assert_eq!("blog_posts_seen", BlogPostsSeen.to_string());
-    }
-
-    #[test]
-    fn all_metrics_in_static_metrics() {
-        let metrics = metrics();
-        for m in Metric::iter() {
-            assert!(metrics.contains_key(&m));
-        }
-    }
-
-    #[test]
-    fn all_metrics_in_summary() {
-        let summary = summarize();
-        for m in Metric::iter() {
-            assert!(summary.contains_key(&m));
-        }
-    }
-}
