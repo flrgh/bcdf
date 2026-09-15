@@ -1208,9 +1208,7 @@ impl CustomQueries for Db {
     }
 }
 
-const MIGRATIONS: &[&str] = &[
-    include_str!("db/migrations/001-init.sql"),
-];
+const MIGRATIONS: &[&str] = &[include_str!("db/migrations/001-init.sql")];
 
 async fn migrate(conn: &mut Db, version: usize, sql: &str) -> anyhow::Result<()> {
     let tx = conn.begin().await?;
