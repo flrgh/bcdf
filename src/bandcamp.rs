@@ -1,10 +1,14 @@
 use rss::Channel;
 use scraper::{Html, Selector};
 use sea_orm::ActiveValue::{NotSet, Set};
-use std::{borrow::Cow, collections::HashMap, sync::LazyLock};
+use serde::Deserialize;
+use serde_json::Value;
+use std::{borrow::Cow, sync::LazyLock};
 
+use crate::compress;
 use crate::db::{active_model, model, release::Type as ReleaseType};
-use crate::types::{DateTime, Duration};
+use crate::http;
+use crate::types::DateTime;
 
 pub(crate) const DAILY_BASE_URL: &str = "https://daily.bandcamp.com";
 pub(crate) const FEED_URL: &str = "https://daily.bandcamp.com/feed/";
@@ -40,20 +44,11 @@ macro_rules! selector {
 selector!(DAILY_ARTICLE, "#p-daily-article");
 selector!(POST_META, "head meta");
 
-fn duration_from_f64<'de, D>(deserializer: D) -> Result<Duration, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    let secs: f64 = serde::de::Deserialize::deserialize(deserializer)?;
-    Ok(Duration::from_secs_f64(secs))
-}
-
-#[derive(Debug, PartialEq, Clone, serde::Deserialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize)]
 pub(crate) struct TrackInfo {
     pub(crate) artist: String,
 
-    #[serde(deserialize_with = "duration_from_f64")]
-    pub(crate) audio_track_duration: Duration,
+    pub(crate) audio_track_duration: f64,
     pub(crate) track_number: usize,
     pub(crate) track_title: String,
     pub(crate) audio_url: std::collections::BTreeMap<String, String>,
@@ -62,7 +57,7 @@ pub(crate) struct TrackInfo {
     pub(crate) track_id: u64,
 }
 
-#[derive(Debug, PartialEq, Clone, serde::Deserialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize)]
 pub(crate) struct PlayerData {
     pub(crate) title: String,
     pub(crate) tracklist: Vec<TrackInfo>,
@@ -79,11 +74,13 @@ pub(crate) struct PlayerData {
 impl PlayerData {
     pub(crate) fn try_into_models(
         self,
-    ) -> anyhow::Result<(
-        active_model::Track,
-        active_model::Release,
-        active_model::Artist,
-    )> {
+    ) -> anyhow::Result<
+        Option<(
+            active_model::Track,
+            active_model::Release,
+            active_model::Artist,
+        )>,
+    > {
         let PlayerData {
             title,
             tracklist,
@@ -100,7 +97,7 @@ impl PlayerData {
             .into_iter()
             .find(|ti| ti.track_number == featured_track_number)
         else {
-            anyhow::bail!("featured track #{featured_track_number} not found");
+            return Ok(None);
         };
 
         let TrackInfo {
@@ -176,7 +173,7 @@ impl PlayerData {
         let track = active_model::Track {
             id: Set(track_id.to_string()),
             title: Set(track_title),
-            duration: Set(audio_track_duration.as_secs_f64()),
+            duration: Set(audio_track_duration),
             download_url: download_url.map(|url| Set(Some(url))).unwrap_or(NotSet),
             credited_artist: Set(credited_artist),
             release_id: Set(parent_tralbum_id.to_string()),
@@ -184,13 +181,12 @@ impl PlayerData {
             ..Default::default()
         };
 
-        Ok((track, release, release_artist))
+        Ok(Some((track, release, release_artist)))
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct ScrapeModels {
-    pub(crate) scrape: active_model::Scrape,
+pub(crate) struct PostModels {
     pub(crate) post: active_model::Post,
     pub(crate) items: Vec<(
         active_model::PostTrack,
@@ -200,58 +196,8 @@ pub(crate) struct ScrapeModels {
     )>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ScrapeTask {
-    url: String,
-    metadata: HashMap<String, String>,
-    raw_track_info: String,
-    tracks: Vec<Option<PlayerData>>,
-}
-
-impl ScrapeTask {
-    pub(crate) async fn fetch(url: &str, client: &reqwest::Client) -> anyhow::Result<Self> {
-        let req = client.get(url).build()?;
-        let bytes = client
-            .execute(req)
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
-
-        Self::try_from_html(url, bytes)
-    }
-
-    fn tracks_from_doc(doc: &Html) -> anyhow::Result<(String, Vec<Option<PlayerData>>)> {
-        let Some(raw_track_info) = DAILY_ARTICLE
-            .select(doc)
-            .find_map(|elem| elem.attr("data-player-infos"))
-        else {
-            anyhow::bail!("No data-player-infos track info found in post HTML");
-        };
-
-        let json: serde_json::Value = serde_json::from_str(raw_track_info)?;
-        let serde_json::Value::Array(arr) = json else {
-            anyhow::bail!("'data-player-infos' was not a JSON array");
-        };
-
-        let track_info = arr
-            .into_iter()
-            .map(|v| {
-                if v.is_null() {
-                    Ok(None)
-                } else {
-                    match serde_json::from_value(v.clone()) {
-                        Ok(pd) => Ok(Some(pd)),
-                        Err(e) => Err(anyhow::anyhow!("woops! {e}\n{v}\n")),
-                    }
-                }
-            })
-            .collect::<Result<Vec<Option<PlayerData>>, anyhow::Error>>()?;
-
-        Ok((raw_track_info.to_string(), track_info))
-    }
-
-    pub(crate) fn try_from_html<T: Into<Vec<u8>>>(url: &str, bytes: T) -> anyhow::Result<Self> {
+impl active_model::Scrape {
+    fn try_from_html<T: Into<Vec<u8>>>(url: &str, bytes: T) -> anyhow::Result<Self> {
         let html = String::from_utf8(bytes.into())?;
 
         let doc = Html::parse_document(&html);
@@ -268,56 +214,92 @@ impl ScrapeTask {
             let _ = metadata.insert(prop.to_string(), value.to_string());
         }
 
-        let (raw_track_info, tracks) = Self::tracks_from_doc(&doc)?;
+        let player_data = {
+            let Some(player_data) = DAILY_ARTICLE
+                .select(&doc)
+                .find_map(|elem| elem.attr("data-player-infos"))
+            else {
+                anyhow::bail!("No data-player-infos track info found in post HTML");
+            };
 
-        Ok(Self {
-            url: url.to_string(),
-            metadata,
-            raw_track_info,
-            tracks,
-        })
-    }
+            // sanity check
+            let json: Value = serde_json::from_str(player_data)?;
+            if !json.is_array() {
+                anyhow::bail!("'data-player-infos' was not a JSON array");
+            }
 
-    pub(crate) fn try_into_models(self) -> anyhow::Result<ScrapeModels> {
-        let ScrapeTask {
-            url,
-            mut metadata,
-            raw_track_info,
-            tracks: track_json,
-        } = self;
-
-        let scrape = active_model::Scrape {
-            url: Set(url.clone()),
-            metadata: Set(metadata.clone().into()),
-            player_data: Set(crate::compress::compress(&raw_track_info)?),
-            created_at: Set(chrono::Utc::now()),
-            updated_at: Set(chrono::Utc::now()),
+            compress::compress(player_data)?
         };
 
-        let mut items = Vec::with_capacity(track_json.len());
+        let now = chrono::Utc::now();
 
-        for (i, player_data) in track_json.into_iter().flatten().enumerate() {
-            let post_track_number = i + 1;
-            let (track, release, artist) = player_data.try_into_models()?;
+        Ok(active_model::Scrape {
+            url: Set(url.to_string()),
+            metadata: Set(metadata.into()),
+            player_data: Set(player_data),
+            created_at: Set(now),
+            updated_at: Set(now),
+        })
+    }
+}
 
-            // FIXME: `track` is an `ActiveModel` because not all fields are
-            // set/known at this point, but we _do_ expect `track.id` to be
-            // set
-            let Some(track_id) = track.id.try_as_ref().map(|id| id.to_owned()) else {
-                anyhow::bail!("post {url} track #{post_track_number} track id is unset");
-            };
+impl model::Scrape {
+    pub(crate) fn try_as_post_models(&self) -> anyhow::Result<PostModels> {
+        let model::Scrape {
+            url,
+            metadata,
+            player_data,
+            ..
+        } = self;
 
-            let post_track = active_model::PostTrack {
-                post_url: Set(url.clone()),
-                post_track_number: Set(post_track_number as u32),
-                track_id: Set(track_id),
-                ..Default::default()
-            };
+        let items = {
+            let track_json: Vec<Value> = compress::decompress_json::<Vec<Value>>(player_data)?;
 
-            items.push((post_track, track, release, artist));
-        }
+            let mut items = Vec::with_capacity(track_json.len());
+
+            let mut post_track_number = 0;
+            for value in track_json.into_iter() {
+                // nulls can occur in player data, but we currently don't increment track number for
+                // them
+                if value.is_null() {
+                    continue;
+                }
+
+                let player_data = PlayerData::deserialize(value)?;
+                let featured_track_number = player_data.featured_track_number;
+
+                let Some((track, release, artist)) = player_data.try_into_models()? else {
+                    tracing::warn!(
+                        "featured track {featured_track_number} for post track {} not found, skipping it",
+                        post_track_number + 1
+                    );
+                    continue;
+                };
+
+                post_track_number += 1;
+
+                // FIXME: `track` is an `ActiveModel` because not all fields are
+                // set/known at this point, but we _do_ expect `track.id` to be
+                // set
+                let Some(track_id) = track.id.try_as_ref().map(|id| id.to_owned()) else {
+                    anyhow::bail!("post {url} track #{post_track_number} track id is unset");
+                };
+
+                let post_track = active_model::PostTrack {
+                    post_url: Set(url.clone()),
+                    post_track_number: Set(post_track_number as u32),
+                    track_id: Set(track_id),
+                    ..Default::default()
+                };
+
+                items.push((post_track, track, release, artist));
+            }
+
+            items
+        };
 
         let post = {
+            let mut metadata = metadata.clone();
             let mut get_meta = |name: &str| -> anyhow::Result<String> {
                 metadata
                     .remove(name)
@@ -325,10 +307,10 @@ impl ScrapeTask {
             };
 
             let published: DateTime = get_meta("article:published_time")?.parse()?;
-            let dir = model::Post::derive_post_dir(&published, &url);
+            let dir = model::Post::derive_post_dir(&published, url);
 
             active_model::Post {
-                url: Set(url.clone()),
+                url: Set(url.to_owned()),
                 title: Set(get_meta("og:title")?),
                 description: Set(get_meta("og:description")?),
                 published_at: Set(published),
@@ -339,93 +321,11 @@ impl ScrapeTask {
             }
         };
 
-        Ok(ScrapeModels {
-            scrape,
-            post,
-            items,
-        })
+        Ok(PostModels { post, items })
     }
 }
 
-// impl model::Scrape {
-//     fn try_into_upsert(self) -> anyhow::Result<ScrapeModels> {
-//         let model::Scrape {
-//             url,
-//             mut metadata,
-//             player_data,
-//             created_at,
-//             updated_at,
-//         } = self;
-//
-//         let track_json: Vec<serde_json::Value> = crate::compress::decompress_json(&player_data)?;
-//
-//         let scrape = active_model::Scrape {
-//             url: Set(url.clone()),
-//             metadata: Set(metadata.clone().into()),
-//             player_data: Set(player_data),
-//             created_at: Set(created_at),
-//             updated_at: Set(updated_at),
-//         };
-//
-//         let mut items = Vec::with_capacity(track_json.len());
-//
-//         for (i, player_data) in track_json.into_iter().flatten().enumerate() {
-//             let post_track_number = i + 1;
-//             let (track, release, artist) = player_data.try_into_models()?;
-//
-//             // FIXME: `track` is an `ActiveModel` because not all fields are
-//             // set/known at this point, but we _do_ expect `track.id` to be
-//             // set
-//             let Some(track_id) = track.id.try_as_ref().map(|id| id.to_owned()) else {
-//                 anyhow::bail!("post {url} track #{post_track_number} track id is unset");
-//             };
-//
-//             let post_track = active_model::PostTrack {
-//                 post_url: Set(url.clone()),
-//                 post_track_number: Set(post_track_number as u32),
-//                 track_id: Set(track_id),
-//                 ..Default::default()
-//             };
-//
-//             items.push((post_track, track, release, artist));
-//         }
-//
-//         let post = {
-//             let mut get_meta = |name: &str| -> anyhow::Result<String> {
-//                 metadata
-//                     .remove(name)
-//                     .ok_or_else(|| anyhow::anyhow!("post metadata value for {name} not found"))
-//             };
-//
-//             let published: DateTime = get_meta("article:published_time")?.parse()?;
-//             let dir = model::Post::derive_post_dir(&published, &url);
-//
-//             active_model::Post {
-//                 url: Set(url.clone()),
-//                 title: Set(get_meta("og:title")?),
-//                 description: Set(get_meta("og:description")?),
-//                 published_at: Set(published),
-//                 modified_at: Set(get_meta("article:modified_time")?.parse()?),
-//                 created_at: Set(chrono::Utc::now()),
-//                 updated_at: Set(chrono::Utc::now()),
-//                 dir: Set(dir),
-//             }
-//         };
-//
-//         Ok(ScrapeModels {
-//             scrape,
-//             post,
-//             items,
-//         })
-//
-//     }
-// }
-
-pub(crate) async fn scrape(url: &str, client: &reqwest::Client) -> anyhow::Result<ScrapeTask> {
-    ScrapeTask::fetch(url, client).await
-}
-
-pub(crate) async fn urls_from_rss(client: &reqwest::Client) -> anyhow::Result<Vec<String>> {
+pub(crate) async fn urls_from_rss(client: &http::Client) -> anyhow::Result<Vec<String>> {
     let content = client
         .execute(client.get(FEED_URL).build()?)
         .await?
@@ -452,4 +352,24 @@ pub(crate) fn post_url(url: &str) -> Cow<'_, str> {
 
 pub(crate) fn post_path(url: &str) -> &str {
     url.strip_prefix(DAILY_BASE_URL).unwrap_or(url)
+}
+
+pub(crate) async fn scrape(
+    url: &str,
+    client: &http::Client,
+) -> anyhow::Result<active_model::Scrape> {
+    tracing::info!("scraping post: {url}");
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    let req = client.get(url).build()?;
+    let bytes = client
+        .execute(req)
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+
+    let scrape = active_model::Scrape::try_from_html(url, bytes)?;
+
+    Ok(scrape)
 }

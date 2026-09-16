@@ -4,8 +4,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 
 use crate::db::{CustomQueries as _, full};
-use crate::http;
 use crate::metrics;
+use crate::{http, mp3};
 
 impl crate::App {
     pub(crate) async fn download(&self, data: &mut full::Post) -> anyhow::Result<()> {
@@ -34,9 +34,15 @@ impl crate::App {
             let filename = track.derive_filename();
             let path = dir.join(&filename);
 
-            if path.is_file() {
-                tracing::debug!(track.track.track.title, "SKIP: exists, recording it");
-                downloaded.push((number, filename));
+            if path.exists() {
+                if mp3::check_track(track, &path).is_ok() {
+                    tracing::info!(track.track.track.title, "SKIP: exists, recording it");
+                    downloaded.push((number, filename));
+                } else {
+                    tracing::warn!(
+                        "an existing file exists at {path:?} but does not appear to be the right mp3 track"
+                    );
+                }
                 continue;
             }
 
@@ -56,11 +62,12 @@ impl crate::App {
 
                 match res.status().as_u16() {
                     200 => {}
+                    410 => {
+                        anyhow::bail!("{title} -> HTTP 410");
+                    }
                     status => {
                         let body = res.text().await.ok();
-                        tracing::error!(title, status, body, "download failed");
-
-                        anyhow::bail!("non-200 status: {status}");
+                        anyhow::bail!("{title} -> HTTP {status}: {body:?}");
                     }
                 }
 

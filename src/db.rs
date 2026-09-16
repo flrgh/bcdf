@@ -8,6 +8,7 @@ pub(crate) use sea_orm::{
     ConnectionTrait,
     Database,
     DatabaseConnection as Db,
+    //DatabaseTransaction as Transaction,
     DerivePartialModel,
     //EntityLoaderTrait as _,
     EntityTrait,
@@ -29,6 +30,7 @@ pub(crate) use sea_orm::{
     //SelectorTrait as _,
     Statement,
     //StatementBuilder as _,
+    TransactionSession,
     TransactionTrait,
     //TryIntoModel as _,
     entity::prelude::*,
@@ -314,6 +316,13 @@ pub(crate) mod post {
                 self.title,
             )
         }
+
+        pub(crate) async fn tracks<C>(&self, db: &C) -> anyhow::Result<Vec<model::PostTrack>>
+        where
+            C: ConnectionTrait,
+        {
+            Ok(self.find_related(entity::PostTrack).all(db).await?)
+        }
     }
 
     impl super::traits::ApplyTo<Select<Entity>> for crate::query::Query {
@@ -467,24 +476,19 @@ pub(crate) mod post_track {
     impl super::traits::Upsert for ActiveModel {
         fn on_upsert_conflict() -> OnConflict {
             use Column::*;
-            use sea_orm::sea_query::ExprTrait as _;
 
-            fn keep_if_same_track_id(c: Column) -> (Column, Expr) {
+            fn overwrite_if_not_null(c: Column) -> (Column, Expr) {
                 (
                     c,
-                    Expr::case(
-                        Expr::col((Entity, TrackId)).equals(("excluded", TrackId)),
-                        Expr::col((Entity, c)),
-                    )
-                    .into(),
+                    Func::coalesce([Expr::col(("excluded", c)), Expr::col((Entity, c))]).into(),
                 )
             }
 
             OnConflict::columns([PostUrl, PostTrackNumber])
                 .update_column(TrackId)
                 .values([
-                    keep_if_same_track_id(Filename),
-                    keep_if_same_track_id(SpotifyPlaylistId),
+                    overwrite_if_not_null(Filename),
+                    overwrite_if_not_null(SpotifyPlaylistId),
                 ])
                 .to_owned()
         }
@@ -910,9 +914,6 @@ pub(crate) mod views {
 
         #[sea_orm(skip)]
         pub(crate) tracks: Vec<PostTrackAll>,
-
-        #[sea_orm(nested)]
-        pub(crate) scrape: Option<model::Scrape>,
     }
 
     impl PostItems {
@@ -920,10 +921,12 @@ pub(crate) mod views {
             entity::Post::find()
                 .inner_join(entity::PostShortId)
                 .left_join(entity::Playlist)
-                .left_join(entity::Scrape)
         }
 
-        pub(crate) async fn get(db: &Db, url_or_short_id: &str) -> anyhow::Result<Option<Self>> {
+        pub(crate) async fn get<C: ConnectionTrait>(
+            db: &C,
+            url_or_short_id: &str,
+        ) -> anyhow::Result<Option<Self>> {
             Self::load(
                 db,
                 Condition::any()
@@ -947,7 +950,10 @@ pub(crate) mod views {
             .await
         }
 
-        async fn load(db: &Db, filter: Condition) -> anyhow::Result<Option<Self>> {
+        async fn load<C: ConnectionTrait>(
+            db: &C,
+            filter: Condition,
+        ) -> anyhow::Result<Option<Self>> {
             let Some(mut post) = Self::select()
                 .filter(filter)
                 .into_partial_model::<Self>()
@@ -1145,7 +1151,7 @@ pub(crate) trait CustomQueries {
     ) -> anyhow::Result<model::Playlist>;
 }
 
-impl CustomQueries for Db {
+impl<T: ConnectionTrait> CustomQueries for T {
     async fn get_post(&self, url_or_short_id: &str) -> anyhow::Result<views::PostItems> {
         let Some(post) = views::PostItems::get(self, url_or_short_id).await? else {
             anyhow::bail!("no post found for {url_or_short_id}");

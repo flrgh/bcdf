@@ -1,7 +1,73 @@
 use clap::Subcommand;
+use std::time::Duration;
 use std::{collections::HashSet, fs, io, os::unix::prelude::MetadataExt as _, path::PathBuf};
 
-use crate::db::CustomQueries as _;
+use crate::db::{CustomQueries as _, views};
+
+#[derive(Debug)]
+pub(crate) enum TrackError {
+    NotFound,
+    NotAFile,
+    Mismatch,
+    Other,
+}
+
+pub(crate) fn check_track(
+    track: &views::PostTrackAll,
+    track_file: &PathBuf,
+) -> Result<(), TrackError> {
+    let stat = match fs::metadata(track_file) {
+        Ok(md) => md,
+        Err(err) => {
+            if let io::ErrorKind::NotFound = err.kind() {
+                tracing::error!("track file {track_file:?} does not exist");
+                return Err(TrackError::NotFound);
+            } else {
+                tracing::error!("failed to stat() file {track_file:?}: {err}");
+                return Err(TrackError::Other);
+            }
+        }
+    };
+
+    if !stat.is_file() {
+        tracing::error!("track file {track_file:?} is not a regular file");
+        return Err(TrackError::NotAFile);
+    }
+
+    let size = stat.size();
+    let exp = track.track.track.duration as u64 * 128 * (1024 / 8);
+
+    let diff = size.abs_diff(exp);
+    let pct = (diff as f64 / exp as f64) * 100f64;
+
+    if pct > 1.0 || true {
+        let from_db = Duration::from_secs_f64(track.track.track.duration);
+
+        let from_file = match mp3_duration::from_path(track_file) {
+            Ok(fd) => fd,
+            Err(e) => {
+                tracing::error!("failed reading mp3 duration of track file {track_file:?}: {e}");
+                return Err(TrackError::Other);
+            }
+        };
+
+        let diff = from_db.abs_diff(from_file).as_secs_f64();
+
+        if diff > 5.0 {
+            tracing::warn!(
+                "track file {track_file:?} is expected to be {}:{:02}s but is actually {}:{:02}s",
+                from_db.as_secs() / 60,
+                from_db.as_secs() % 60,
+                from_file.as_secs() / 60,
+                from_file.as_secs() % 60,
+            );
+
+            return Err(TrackError::Mismatch);
+        }
+    }
+
+    Ok(())
+}
 
 impl crate::App {
     pub(crate) async fn check(&self) -> anyhow::Result<()> {
@@ -33,83 +99,19 @@ impl crate::App {
                 };
 
                 let track_file = post_dir.join(fname);
-
-                let stat = match fs::metadata(&track_file) {
-                    Ok(md) => md,
-                    Err(err) => {
-                        errors += 1;
-                        if let io::ErrorKind::NotFound = err.kind() {
-                            tracing::warn!("track file {track_file:?} does not exist");
-                        } else {
-                            tracing::error!("track file {track_file:?} stat failed: {err}");
+                if let Err(e) = check_track(t, &track_file) {
+                    match e {
+                        TrackError::NotFound | TrackError::NotAFile | TrackError::Other => {
+                            errors += 1;
+                            continue;
                         }
-                        continue;
+                        TrackError::Mismatch => {
+                            warnings += 1;
+                        }
                     }
-                };
-
-                if !stat.is_file() {
-                    errors += 1;
-                    tracing::warn!("track file {track_file:?} is not a regular file");
-                    continue;
                 }
 
                 post_track_files.remove(&track_file);
-
-                let size = stat.size();
-                let exp = t.track.track.duration as u64 * 128 * (1024 / 8);
-
-                let diff = size.abs_diff(exp);
-                let pct = (diff as f64 / exp as f64) * 100f64;
-
-                if pct > 20.0 {
-                    let from_db = std::time::Duration::from_secs_f64(t.track.track.duration);
-
-                    let from_file = match mp3_duration::from_path(&track_file) {
-                        Ok(fd) => fd,
-                        Err(e) => {
-                            errors += 1;
-                            tracing::error!(
-                                "failed reading mp3 duration of track file {track_file:?}: {e}"
-                            );
-                            continue;
-                        }
-                    };
-
-                    let diff = from_db.abs_diff(from_file).as_secs_f64();
-                    let pct = (diff / from_db.as_secs_f64()) * 100f64;
-
-                    if pct > 5.0 {
-                        warnings += 1;
-
-                        tracing::warn!(
-                            "track file {track_file:?} is expected to be {}:{:02} but is actually {}:{:02}",
-                            from_db.as_secs() / 60,
-                            from_db.as_secs() % 60,
-                            from_file.as_secs() / 60,
-                            from_file.as_secs() % 60,
-                        );
-                    }
-                }
-
-                // if size > exp && pct > 30.0 {
-                //     warnings += 1;
-                //     let exp = exp / 1024;
-                //     let size = size / 1024;
-                //     let diff = diff / 1024;
-                //     tracing::warn!(
-                //         "track file {track_file:?} is {diff} KB ({pct:.2}%) bigger than expected ({size}KB > {exp}KB)"
-                //     );
-                //
-                // } else if size < exp && pct > 20.0 {
-                //     warnings += 1;
-                //     let exp = exp / 1024;
-                //     let size = size / 1024;
-                //     let diff = diff / 1024;
-                //
-                //     tracing::warn!(
-                //         "track file {track_file:?} is {diff} KB ({pct:.2}%) smaller than expected ({size}KB < {exp}KB)"
-                //     );
-                // }
             }
 
             let mut leftover: Vec<PathBuf> = post_track_files.drain().collect();
