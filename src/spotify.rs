@@ -10,7 +10,10 @@ use rspotify::{
     prelude::*,
 };
 
-use crate::db::{CustomQueries as _, Db, entity, full, model, traits::SpotifyPlaylistId};
+use crate::db::{
+    CustomQueries as _, Db, EntityTrait as _, entity, full, model, playlist,
+    traits::SpotifyPlaylistId,
+};
 use crate::metrics;
 use crate::search::{MatchResult, TrackArtists, TrackMatcher, TrackTitle};
 
@@ -36,6 +39,15 @@ impl Is404 for ClientError {
 
         false
     }
+}
+
+async fn mark_user_deleted(db: &Db, pl: &mut model::Playlist) -> anyhow::Result<()> {
+    db.set_playlist_status(&pl.id, playlist::Status::UserDeleted)
+        .await?;
+
+    pl.status = playlist::Status::UserDeleted;
+
+    Ok(())
 }
 
 async fn inspect_client_error(e: ClientError) -> anyhow::Error {
@@ -214,7 +226,7 @@ impl Client {
             .inspect_client_error()
             .await?;
 
-        let created = db.upsert_playlist(&post.url, pl.id.id(), &pl.name).await?;
+        let created = db.upsert_playlist(post, pl.id.id(), &pl.name).await?;
 
         metrics::inc(metrics::SpotifyPlaylistsCreated, 1);
 
@@ -402,24 +414,8 @@ impl Client {
         Ok(())
     }
 
-    async fn delete_playlist(
-        &self,
-        db: &Db,
-        pl: model::Playlist,
-        tracks: &mut [full::PostTrack],
-    ) -> anyhow::Result<()> {
-        for track in tracks.iter_mut() {
-            track.post_track.spotify_playlist_id = None;
-
-            match db.update_post_track(&track.post_track).await {
-                Ok(pt) => track.post_track = pt,
-                Err(e) => {
-                    tracing::warn!("failed updating post track: {e}");
-                }
-            }
-        }
-
-        let db_res = entity::Playlist::delete_by_post_url(&pl.post_url)
+    async fn delete_playlist(&self, db: &Db, pl: model::Playlist) -> anyhow::Result<()> {
+        let db_res = entity::Playlist::delete_by_id(pl.id.as_str())
             .exec(db)
             .await
             .context("deleting playlist from the database");
@@ -431,32 +427,10 @@ impl Client {
             .inspect_client_error()
             .await
         {
-            tracing::error!(
-                "failed deleting post {} playlist ({}) from spotify: {}",
-                &pl.post_url,
-                &pl.id,
-                e,
-            );
+            tracing::error!("failed deleting playlist ({}) from spotify: {}", &pl.id, e);
         };
 
         let _ = db_res?;
-
-        Ok(())
-    }
-
-    pub(crate) async fn set_playlist_user_deleted(
-        &self,
-        db: &Db,
-        pl: &mut model::Playlist,
-    ) -> anyhow::Result<()> {
-        use crate::db::{ColumnTrait, EntityTrait, Expr, QueryFilter, col, entity};
-        let _ = entity::Playlist::update_many()
-            .col_expr(col::Playlist::UserDeleted, Expr::value(true))
-            .filter(col::Playlist::Id.eq(&pl.id))
-            .exec(db)
-            .await?;
-
-        pl.user_deleted = true;
 
         Ok(())
     }
@@ -482,12 +456,12 @@ impl Client {
                 &pl.id
             );
 
-            return self.delete_playlist(db, pl, &mut data.tracks).await;
+            return self.delete_playlist(db, pl).await;
         }
 
         let pl = match &mut data.playlist {
-            Some(pl) if pl.user_deleted => {
-                tracing::info!("skipping deleted playlist {}", pl.id);
+            Some(pl) if pl.status != playlist::Status::Active => {
+                tracing::info!("skipping {:?} playlist {}", pl.status, pl.id);
                 return Ok(());
             }
             Some(pl) => {
@@ -517,14 +491,14 @@ impl Client {
                                 &data.post.url,
                                 &pl.id
                             );
-                            self.set_playlist_user_deleted(db, pl).await?;
+                            mark_user_deleted(db, pl).await?;
                             return Ok(());
                         }
 
                         return Err(inspect_client_error(e).await);
                     }
 
-                    let _ = db.upsert_playlist(&pl.post_url, &pl.id, &exp_name).await?;
+                    let _ = db.upsert_playlist(&data.post, &pl.id, &exp_name).await?;
                     pl.name = exp_name;
                 }
 
@@ -536,8 +510,7 @@ impl Client {
             }
         };
 
-        self.update_playlist_tracks(db, pl, &mut data.tracks)
-            .await?;
+        self.update_playlist_tracks(db, pl, &data.tracks).await?;
 
         Ok(())
     }
@@ -546,9 +519,8 @@ impl Client {
         &self,
         db: &Db,
         playlist: &mut model::Playlist,
-        tracks: &mut [full::PostTrack],
+        tracks: &[full::PostTrack],
     ) -> anyhow::Result<()> {
-        let post_url = &playlist.post_url;
         let plid = playlist.spotify_playlist_id().into_static();
 
         let local_items: Vec<_> = tracks
@@ -578,8 +550,8 @@ impl Client {
                     }
                     Ok(None) => break,
                     Err(e) if e.is_404() => {
-                        tracing::info!("playlist ({plid}) for post {post_url} has been deleted");
-                        self.set_playlist_user_deleted(db, playlist).await?;
+                        tracing::info!("playlist ({plid}) has been deleted");
+                        mark_user_deleted(db, playlist).await?;
                         return Ok(());
                     }
                     Err(e) => anyhow::bail!(e),
@@ -590,45 +562,27 @@ impl Client {
         };
 
         if local_items == remote_items {
-            tracing::debug!("no updates needed to post {post_url} playlist ({plid})",);
+            tracing::debug!("no updates needed to playlist ({plid})");
             return Ok(());
         }
 
         let num_tracks = local_items.len();
 
-        tracing::info!("updating post {post_url} playlist ({plid}) with {num_tracks} items");
+        tracing::info!("updating playlist ({plid}) with {num_tracks} items");
 
         if let Err(e) = self
             .spotify
             .playlist_replace_items(plid.clone(), local_items)
             .await
         {
-            for track in tracks.iter_mut() {
-                track.post_track.spotify_playlist_id = None;
-                if let Ok(pt) = db.update_post_track(&track.post_track).await {
-                    track.post_track = pt;
-                }
-            }
+            db.set_playlist_tracks(&playlist.id, &[]).await?;
 
-            anyhow::bail!("failed updating post {post_url} playlist {plid}: {e}",);
+            anyhow::bail!("failed updating playlist {plid}: {e}");
         };
 
         metrics::inc(metrics::TracksAddedToSpotifyPlaylist, num_tracks);
 
-        for track in tracks.iter_mut() {
-            track.post_track.spotify_playlist_id = if track.track.track.spotify_id.is_some() {
-                Some(playlist.id.to_string())
-            } else {
-                None
-            };
-
-            match db.update_post_track(&track.post_track).await {
-                Ok(pt) => track.post_track = pt,
-                Err(e) => {
-                    tracing::warn!("failed updating post track: {e}");
-                }
-            }
-        }
+        db.set_playlist_tracks(&playlist.id, tracks).await?;
 
         Ok(())
     }

@@ -111,6 +111,7 @@ pub(crate) struct Show {
 impl Show {
     async fn exec(self, app: &crate::App) -> anyhow::Result<()> {
         let row = PostTrack::find_unique(&app.db, &self.query).await?;
+        let playlists = app.db.post_track_playlists(&row.post_track).await?;
 
         let mut out = std::io::stdout().lock();
         match self.output {
@@ -121,6 +122,11 @@ impl Show {
                 let short_id = row.short_id();
                 let number = row.post_track.post_track_number.to_string();
                 let duration = format!("{}:{:02}", secs / 60, secs % 60);
+                let playlists = playlists
+                    .iter()
+                    .map(|id| list::short_spotify_id(id))
+                    .collect::<Vec<_>>()
+                    .join(", ");
 
                 let mut table = list::detail_table();
                 table.add_rows([
@@ -137,10 +143,7 @@ impl Show {
                         "spotify_id",
                         list::short_spotify_id(opt_string(&track.spotify_id)),
                     ],
-                    [
-                        "spotify_playlist_id",
-                        list::short_spotify_id(opt_string(&row.post_track.spotify_playlist_id)),
-                    ],
+                    ["playlists", playlists.as_str()],
                     ["file", opt_string(&row.post_track.filename)],
                     ["download_url", opt_string(&track.download_url)],
                 ]);
@@ -148,7 +151,9 @@ impl Show {
                 writeln!(out, "{table}")?;
             }
             Format::Json => {
-                serde_json::to_writer_pretty(&mut out, &row.json())?;
+                let mut value = row.json();
+                value["playlists"] = json!(playlists);
+                serde_json::to_writer_pretty(&mut out, &value)?;
                 writeln!(out)?;
             }
         };
@@ -379,7 +384,6 @@ impl PostTrack {
             "spotify": track.spotify_id.as_ref().map(|id| json!({
                 "id": id,
                 "match_score": track.spotify_match_score,
-                "playlist_id": self.post_track.spotify_playlist_id,
             })),
             // relative to the data directory, and what the database records
             // rather than what is on disk

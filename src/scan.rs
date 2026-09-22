@@ -101,9 +101,6 @@ impl model::Scrape {
                         );
                     }
                     post_track.filename.set_ne(one.filename.clone());
-                    post_track
-                        .spotify_playlist_id
-                        .set_ne(one.spotify_playlist_id.clone());
                 }
                 Some(rest) => {
                     tracing::warn!("{} existing post tracks with this id", rest.len());
@@ -117,21 +114,6 @@ impl model::Scrape {
                             }
                             (Some(other), Some(mine)) if other != mine => anyhow::bail!(
                                 "conflicting values for track filename: {mine}, {other}"
-                            ),
-                            _ => {}
-                        }
-
-                        match (
-                            other.spotify_playlist_id.as_ref(),
-                            post_track.spotify_playlist_id.as_option(),
-                        ) {
-                            (Some(other), None) => {
-                                tracing::debug!("adopting existing spotify_playlist_id: {other}");
-                                post_track.spotify_playlist_id =
-                                    sea_orm::ActiveValue::Set(Some(other.clone()));
-                            }
-                            (Some(other), Some(mine)) if other != mine => anyhow::bail!(
-                                "conflicting values for track spotify_playlist_id: {mine}, {other}"
                             ),
                             _ => {}
                         }

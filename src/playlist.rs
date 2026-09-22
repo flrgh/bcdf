@@ -67,7 +67,7 @@ enum Field {
 impl ApplyTo<Select<entity::Playlist>> for Sort {
     fn apply_to(self, sel: Select<entity::Playlist>) -> Select<entity::Playlist> {
         let (field, order) = match self.field {
-            Field::Published => (col::Post::PublishedAt.into_simple_expr(), Order::Desc),
+            Field::Published => (col::Playlist::PeriodStart.into_simple_expr(), Order::Desc),
             Field::Name => (
                 Func::lower(col::Playlist::Name.into_simple_expr()).into_simple_expr(),
                 Order::Asc,
@@ -75,10 +75,8 @@ impl ApplyTo<Select<entity::Playlist>> for Sort {
             Field::Tracks => (Expr::col("tracks"), Order::Desc),
         };
 
-        sel.order_by(field, reverse(order, self.reverse)).order_by(
-            col::PostShortId::Id.into_simple_expr(),
-            reverse(Order::Desc, self.reverse),
-        )
+        sel.order_by(field, reverse(order, self.reverse))
+            .order_by(col::Playlist::Id.into_simple_expr(), Order::Asc)
     }
 }
 
@@ -121,10 +119,10 @@ impl List {
 
                 for row in rows {
                     table.add_row(vec![
-                        Cell::new(list::short_spotify_id(&row.id)),
-                        Cell::new(&row.name),
+                        Cell::new(list::short_spotify_id(&row.playlist.id)),
+                        Cell::new(&row.playlist.name),
                         Cell::new(row.tracks),
-                        Cell::new(&row.short_id.id),
+                        Cell::new(row.short_id.map(|s| s.id).unwrap_or_default()),
                     ]);
                 }
 
@@ -135,10 +133,10 @@ impl List {
                     .iter()
                     .map(|row| {
                         json!({
-                            "id": row.id,
-                            "name": row.name,
+                            "playlist": row.playlist,
                             "tracks": row.tracks,
-                            "post": row.post.json_summary(&row.short_id.id),
+                            "post": row.post.as_ref().zip(row.short_id.as_ref())
+                                .map(|(post, short_id)| post.json_summary(&short_id.id)),
                         })
                     })
                     .collect();
@@ -164,19 +162,23 @@ impl PlaylistTrackDetail {
         let secs = self.track.duration as u64;
 
         vec![
-            Cell::new(self.post_track_number),
+            Cell::new(self.post_track.post_track_number),
             Cell::new(&self.track.title),
             Cell::new(self.artist()),
             Cell::new(&self.release.title),
             Cell::new(format!("{}:{:02}", secs / 60, secs % 60)),
-            Cell::new(if self.filename.is_some() { "y" } else { "" }),
+            Cell::new(if self.post_track.filename.is_some() {
+                "y"
+            } else {
+                ""
+            }),
             Cell::new(list::short_spotify_id(
                 self.track.spotify_id.as_deref().unwrap_or_default(),
             )),
         ]
     }
 
-    fn child_json(&self, post_dir: &str) -> Value {
+    fn child_json(&self) -> Value {
         let track = &self.track;
 
         json!({
@@ -185,17 +187,18 @@ impl PlaylistTrackDetail {
             "album_artist": self.artist,
             "album": self.release,
             "duration_secs": track.duration,
-            "post_track_number": self.post_track_number,
+            "post_track_number": self.post_track.post_track_number,
             "album_track_number": track.release_track_number,
             "bandcamp_id": track.id,
             "download_url": track.download_url,
+            "post": self.post.json_summary(&self.post_short_id.id),
             "spotify": track.spotify_id.as_ref().map(|id| json!({
                 "id": id,
                 "match_score": track.spotify_match_score,
             })),
-            "file": self.filename.as_ref().map(|name| json!({
+            "file": self.post_track.filename.as_ref().map(|name| json!({
                 "name": name,
-                "path": format!("{post_dir}/{name}"),
+                "path": format!("{}/{}", self.post.dir, name),
             })),
         })
     }
@@ -221,7 +224,7 @@ impl Show {
             anyhow::bail!("no playlist matched {}", self.query);
         };
 
-        let tracks: Vec<PlaylistTrackDetail> = PlaylistTrackDetail::select(&row.id)
+        let tracks: Vec<PlaylistTrackDetail> = PlaylistTrackDetail::select(&row.playlist.id)
             .into_partial_model::<PlaylistTrackDetail>()
             .all(&app.db)
             .await?;
@@ -229,18 +232,38 @@ impl Show {
         let mut out = std::io::stdout().lock();
         match self.output {
             Format::Table => {
-                let published = row
-                    .post
-                    .published_at
+                let playlist = &row.playlist;
+                let post = row
+                    .short_id
+                    .as_ref()
+                    .map(|short_id| short_id.id.as_str())
+                    .unwrap_or_default();
+                let start = playlist
+                    .period_start
                     .to_rfc3339_opts(SecondsFormat::Secs, true);
+                let period = if playlist.period_start == playlist.period_end {
+                    start
+                } else {
+                    format!(
+                        "{start} .. {}",
+                        playlist
+                            .period_end
+                            .to_rfc3339_opts(SecondsFormat::Secs, true),
+                    )
+                };
+                let kind = format!("{:?}", playlist.kind);
+                let status = format!("{:?}", playlist.status);
                 let count = tracks.len().to_string();
 
                 let mut table = list::detail_table();
                 table.add_rows([
-                    ["id", list::short_spotify_id(&row.id)],
-                    ["name", row.name.as_str()],
-                    ["post", row.short_id.id.as_str()],
-                    ["published", published.as_str()],
+                    ["id", list::short_spotify_id(&playlist.id)],
+                    ["name", playlist.name.as_str()],
+                    ["kind", kind.as_str()],
+                    ["status", status.as_str()],
+                    ["post", post],
+                    ["category", playlist.category.as_deref().unwrap_or_default()],
+                    ["period", period.as_str()],
                     ["tracks", count.as_str()],
                 ]);
 
@@ -262,17 +285,14 @@ impl Show {
                 writeln!(out, "{child}")?;
             }
             Format::Json => {
-                let tracks: Vec<Value> = tracks
-                    .iter()
-                    .map(|track| track.child_json(&row.post.dir))
-                    .collect();
+                let tracks: Vec<Value> = tracks.iter().map(|track| track.child_json()).collect();
 
                 serde_json::to_writer_pretty(
                     &mut out,
                     &json!({
-                        "id": row.id,
-                        "name": row.name,
-                        "post": row.post.json_summary(&row.short_id.id),
+                        "playlist": row.playlist,
+                        "post": row.post.as_ref().zip(row.short_id.as_ref())
+                            .map(|(post, short_id)| post.json_summary(&short_id.id)),
                         "tracks": tracks,
                     }),
                 )?;

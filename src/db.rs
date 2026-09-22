@@ -34,11 +34,7 @@ pub(crate) use sea_orm::{
     TransactionTrait,
     //TryIntoModel as _,
     entity::prelude::*,
-    sea_query::{
-        Func,
-        //ExprTrait as _,
-        OnConflict,
-    },
+    sea_query::{ExprTrait as _, Func, OnConflict},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -228,6 +224,9 @@ pub(crate) mod post {
         #[sea_orm(indexed)]
         pub dir: String,
 
+        #[sea_orm(indexed)]
+        pub category: Option<String>,
+
         #[sea_orm(has_many)]
         pub tracks: HasMany<super::post_track::Entity>,
 
@@ -255,13 +254,25 @@ pub(crate) mod post {
 
     impl Entity {
         pub(crate) fn missing_spotify_tracks() -> Expr {
+            let in_post_playlist = entity::PlaylistTrack::find()
+                .inner_join(entity::Playlist)
+                .filter(col::Playlist::Kind.eq(super::playlist::Kind::Post))
+                .select_only()
+                .column(col::PlaylistTrack::PostUrl)
+                .column(col::PlaylistTrack::PostTrackNumber)
+                .into_query();
+
             Column::Url.in_subquery(
                 entity::PostTrack::find()
                     .inner_join(entity::Track)
                     .filter(
-                        Condition::any()
-                            .add(col::Track::SpotifyId.is_null())
-                            .add(col::PostTrack::SpotifyPlaylistId.is_null()),
+                        Condition::any().add(col::Track::SpotifyId.is_null()).add(
+                            Expr::tuple([
+                                col::PostTrack::PostUrl.into_simple_expr(),
+                                col::PostTrack::PostTrackNumber.into_simple_expr(),
+                            ])
+                            .not_in_subquery(in_post_playlist),
+                        ),
                     )
                     .select_only()
                     .column(col::PostTrack::PostUrl)
@@ -455,14 +466,11 @@ pub(crate) mod post_track {
 
         pub filename: Option<String>,
 
-        #[sea_orm(indexed)]
-        pub spotify_playlist_id: Option<String>,
-
         #[sea_orm(belongs_to, from = "track_id", to = "id")]
         pub track: BelongsTo<super::track::Entity>,
 
-        #[sea_orm(belongs_to, from = "spotify_playlist_id", to = "id")]
-        pub spotify_playlist: BelongsTo<Option<super::playlist::Entity>>,
+        #[sea_orm(has_many)]
+        pub playlist_tracks: HasMany<super::playlist_track::Entity>,
 
         #[sea_orm(belongs_to, from = "post_url", to = "url")]
         pub post: BelongsTo<super::post::Entity>,
@@ -486,10 +494,7 @@ pub(crate) mod post_track {
 
             OnConflict::columns([PostUrl, PostTrackNumber])
                 .update_column(TrackId)
-                .values([
-                    overwrite_if_not_null(Filename),
-                    overwrite_if_not_null(SpotifyPlaylistId),
-                ])
+                .values([overwrite_if_not_null(Filename)])
                 .to_owned()
         }
     }
@@ -728,6 +733,33 @@ pub(crate) mod playlist {
     use super::*;
     use rspotify::model::PlaylistId;
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize)]
+    #[sea_orm(
+        rs_type = "String",
+        db_type = "String(StringLen::None)",
+        rename_all = "snake_case"
+    )]
+    pub(crate) enum Kind {
+        Post,
+        Category,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize)]
+    #[sea_orm(
+        rs_type = "String",
+        db_type = "String(StringLen::None)",
+        rename_all = "snake_case"
+    )]
+    pub(crate) enum Status {
+        Active,
+
+        Retired,
+
+        // used to mark playlists that have been deleted from spotify because
+        // I listened to them and chose not to keep them around
+        UserDeleted,
+    }
+
     #[sea_orm::model]
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize)]
     #[sea_orm(table_name = "spotify_playlists")]
@@ -736,24 +768,31 @@ pub(crate) mod playlist {
         pub id: String,
         pub name: String,
 
+        pub kind: Kind,
+
+        #[sea_orm(indexed)]
+        pub status: Status,
+
         pub created_at: DateTime,
         pub updated_at: DateTime,
 
-        // used to mark playlists that have been deleted from spotify because
-        // I listened to them and chose not to keep them around
-        #[sea_orm(indexed)]
-        pub user_deleted: bool,
+        pub period_start: DateTime,
+        pub period_end: DateTime,
 
         #[sea_orm(indexed, unique)]
-        pub post_url: String,
+        pub post_url: Option<String>,
+
+        #[sea_orm(indexed)]
+        pub category: Option<String>,
 
         #[sea_orm(belongs_to, from = "post_url", to = "url")]
-        pub post: BelongsTo<super::post::Entity>,
+        pub post: BelongsTo<Option<super::post::Entity>>,
 
         #[sea_orm(belongs_to, from = "post_url", to = "post_url")]
-        pub post_short_id: BelongsTo<super::post_short_id::Entity>,
+        pub post_short_id: BelongsTo<Option<super::post_short_id::Entity>>,
+
         #[sea_orm(has_many)]
-        pub tracks: HasMany<super::post_track::Entity>,
+        pub tracks: HasMany<super::playlist_track::Entity>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -775,7 +814,15 @@ pub(crate) mod playlist {
             use Column::*;
 
             OnConflict::column(Id)
-                .update_columns([Name, PostUrl, UpdatedAt])
+                .update_columns([
+                    Name,
+                    Kind,
+                    PostUrl,
+                    Category,
+                    PeriodStart,
+                    PeriodEnd,
+                    UpdatedAt,
+                ])
                 .to_owned()
         }
     }
@@ -788,7 +835,10 @@ pub(crate) mod playlist {
         type ToEntity = super::post_track::Entity;
 
         fn link(&self) -> Vec<RelationDef> {
-            vec![Relation::Post.def(), super::post::Relation::PostTrack.def()]
+            vec![
+                Relation::PlaylistTrack.def(),
+                super::playlist_track::Relation::PostTrack.def(),
+            ]
         }
     }
 
@@ -801,6 +851,7 @@ pub(crate) mod playlist {
                 Condition::any()
                     .add(col::Playlist::Id.eq(q))
                     .add(col::Playlist::Name.eq(q))
+                    .add(col::Playlist::Category.eq(q))
                     .add(col::Post::Url.eq(url.as_ref()))
                     .add(col::Post::Dir.eq(q))
                     .add(col::PostShortId::Id.eq(q))
@@ -810,6 +861,52 @@ pub(crate) mod playlist {
                     .add(col::Post::Dir.contains(q))
                     .add(col::PostShortId::Id.contains(q)),
             )
+        }
+    }
+}
+
+pub(crate) mod playlist_track {
+    use super::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize)]
+    #[sea_orm(table_name = "spotify_playlist_tracks")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false, indexed)]
+        pub playlist_id: String,
+
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub post_url: String,
+
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub post_track_number: u32,
+
+        #[sea_orm(indexed)]
+        pub track_id: String,
+
+        #[sea_orm(belongs_to, from = "playlist_id", to = "id")]
+        pub playlist: BelongsTo<super::playlist::Entity>,
+
+        #[sea_orm(
+            belongs_to,
+            from = "(post_url, post_track_number, track_id)",
+            to = "(post_url, post_track_number, track_id)"
+        )]
+        pub post_track: BelongsTo<super::post_track::Entity>,
+
+        #[sea_orm(belongs_to, from = "track_id", to = "id")]
+        pub track: BelongsTo<super::track::Entity>,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+
+    pub(crate) struct InPlaylistOrder;
+
+    impl super::traits::ApplyTo<Select<Entity>> for InPlaylistOrder {
+        fn apply_to(self, sel: Select<Entity>) -> Select<Entity> {
+            sel.order_by_asc(col::Post::PublishedAt)
+                .order_by_asc(Column::PostUrl)
+                .order_by_asc(Column::PostTrackNumber)
         }
     }
 }
@@ -825,7 +922,8 @@ pub(crate) mod model {
 pub(crate) mod entity {
     #[allow(unused)]
     pub use super::{
-        artist::Entity as Artist, playlist::Entity as Playlist, post::Entity as Post,
+        artist::Entity as Artist, playlist::Entity as Playlist,
+        playlist_track::Entity as PlaylistTrack, post::Entity as Post,
         post_scrape::Entity as Scrape, post_short_id::Entity as PostShortId,
         post_track::Entity as PostTrack, release::Entity as Release, track::Entity as Track,
     };
@@ -833,7 +931,8 @@ pub(crate) mod entity {
 
 pub(crate) mod col {
     pub(crate) use super::{
-        artist::Column as Artist, playlist::Column as Playlist, post::Column as Post,
+        artist::Column as Artist, playlist::Column as Playlist,
+        playlist_track::Column as PlaylistTrack, post::Column as Post,
         post_scrape::Column as Scrape, post_short_id::Column as PostShortId,
         post_track::Column as PostTrack, release::Column as Release, track::Column as Track,
     };
@@ -843,9 +942,10 @@ pub(crate) mod active_model {
     #[allow(unused)]
     pub(crate) use super::{
         artist::ActiveModel as Artist, playlist::ActiveModel as Playlist,
-        post::ActiveModel as Post, post_scrape::ActiveModel as Scrape,
-        post_short_id::ActiveModel as PostShortId, post_track::ActiveModel as PostTrack,
-        release::ActiveModel as Release, track::ActiveModel as Track,
+        playlist_track::ActiveModel as PlaylistTrack, post::ActiveModel as Post,
+        post_scrape::ActiveModel as Scrape, post_short_id::ActiveModel as PostShortId,
+        post_track::ActiveModel as PostTrack, release::ActiveModel as Release,
+        track::ActiveModel as Track,
     };
 }
 
@@ -1071,22 +1171,22 @@ pub(crate) mod views {
         #[derive(Debug, DerivePartialModel)]
         #[sea_orm(entity = "entity::Playlist")]
         pub(crate) struct PlaylistDetail {
-            pub id: String,
-            pub name: String,
-            #[sea_orm(from_expr = "col::PostTrack::TrackId.count()")]
+            #[sea_orm(nested)]
+            pub playlist: model::Playlist,
+            #[sea_orm(from_expr = "col::PlaylistTrack::TrackId.count()")]
             pub tracks: i64,
             #[sea_orm(nested)]
-            pub post: model::Post,
+            pub post: Option<model::Post>,
             #[sea_orm(nested)]
-            pub short_id: model::PostShortId,
+            pub short_id: Option<model::PostShortId>,
         }
 
         impl PlaylistDetail {
             pub(crate) fn select() -> Select<entity::Playlist> {
                 entity::Playlist::find()
-                    .join(JoinType::InnerJoin, playlist::Relation::Post.def())
-                    .join(JoinType::InnerJoin, playlist::Relation::PostShortId.def())
-                    .join(JoinType::LeftJoin, playlist::Relation::PostTrack.def())
+                    .join(JoinType::LeftJoin, playlist::Relation::Post.def())
+                    .join(JoinType::LeftJoin, playlist::Relation::PostShortId.def())
+                    .join(JoinType::LeftJoin, playlist::Relation::PlaylistTrack.def())
                     .group_by(col::Playlist::Id)
             }
 
@@ -1096,6 +1196,7 @@ pub(crate) mod views {
                 Self::select().filter(
                     Condition::any()
                         .add(col::Playlist::Id.eq(q))
+                        .add(col::Playlist::Name.eq(q))
                         .add(col::Post::Url.eq(crate::bandcamp::post_url(q).as_ref()))
                         .add(col::Post::Dir.eq(q))
                         .add(col::PostShortId::Id.eq(q)),
@@ -1109,10 +1210,14 @@ pub(crate) mod views {
         use super::*;
 
         #[derive(Debug, DerivePartialModel)]
-        #[sea_orm(entity = "entity::PostTrack")]
+        #[sea_orm(entity = "entity::PlaylistTrack")]
         pub struct PlaylistTrackDetail {
-            pub post_track_number: u32,
-            pub filename: Option<String>,
+            #[sea_orm(nested)]
+            pub post_track: model::PostTrack,
+            #[sea_orm(nested)]
+            pub post: model::Post,
+            #[sea_orm(nested)]
+            pub post_short_id: model::PostShortId,
             #[sea_orm(nested)]
             pub track: model::Track,
             #[sea_orm(nested)]
@@ -1122,13 +1227,19 @@ pub(crate) mod views {
         }
 
         impl PlaylistTrackDetail {
-            pub fn select(playlist_id: &str) -> Select<entity::PostTrack> {
-                entity::PostTrack::find()
-                    .join(JoinType::InnerJoin, post_track::Relation::Track.def())
+            pub fn select(playlist_id: &str) -> Select<entity::PlaylistTrack> {
+                entity::PlaylistTrack::find()
+                    .join(
+                        JoinType::InnerJoin,
+                        playlist_track::Relation::PostTrack.def(),
+                    )
+                    .join(JoinType::InnerJoin, post_track::Relation::Post.def())
+                    .join(JoinType::InnerJoin, post_track::Relation::PostShortId.def())
+                    .join(JoinType::InnerJoin, playlist_track::Relation::Track.def())
                     .join(JoinType::InnerJoin, track::Relation::Release.def())
                     .join(JoinType::InnerJoin, release::Relation::Artist.def())
-                    .filter(col::PostTrack::SpotifyPlaylistId.eq(playlist_id))
-                    .order_by_asc(col::PostTrack::PostTrackNumber)
+                    .filter(col::PlaylistTrack::PlaylistId.eq(playlist_id))
+                    .apply(playlist_track::InPlaylistOrder)
             }
         }
     }
@@ -1150,10 +1261,20 @@ pub(crate) trait CustomQueries {
     async fn update_track(&self, track: &model::Track) -> anyhow::Result<model::Track>;
     async fn upsert_playlist(
         &self,
-        post_url: &str,
+        post: &model::Post,
         id: &str,
         name: &str,
     ) -> anyhow::Result<model::Playlist>;
+    async fn set_playlist_status(&self, id: &str, status: playlist::Status) -> anyhow::Result<()>;
+    async fn set_playlist_tracks(
+        &self,
+        playlist_id: &str,
+        tracks: &[full::PostTrack],
+    ) -> anyhow::Result<()>;
+    async fn post_track_playlists(
+        &self,
+        post_track: &model::PostTrack,
+    ) -> anyhow::Result<Vec<String>>;
 }
 
 impl<T: ConnectionTrait> CustomQueries for T {
@@ -1187,24 +1308,82 @@ impl<T: ConnectionTrait> CustomQueries for T {
 
     async fn upsert_playlist(
         &self,
-        post_url: &str,
+        post: &model::Post,
         id: &str,
         name: &str,
     ) -> anyhow::Result<model::Playlist> {
-        use ActiveValue::{NotSet, Set};
+        use ActiveValue::Set;
 
         let now = chrono::Utc::now();
 
         Ok(playlist::ActiveModel {
             id: Set(id.to_string()),
-            post_url: Set(post_url.to_string()),
             name: Set(name.to_string()),
+            kind: Set(playlist::Kind::Post),
+            status: Set(playlist::Status::Active),
             created_at: Set(now),
             updated_at: Set(now),
-            user_deleted: NotSet,
+            period_start: Set(post.published_at),
+            period_end: Set(post.published_at),
+            post_url: Set(Some(post.url.clone())),
+            ..Default::default()
         }
         .upsert(self)
         .await?)
+    }
+
+    async fn set_playlist_status(&self, id: &str, status: playlist::Status) -> anyhow::Result<()> {
+        entity::Playlist::update_many()
+            .col_expr(col::Playlist::Status, status.into())
+            .filter(col::Playlist::Id.eq(id))
+            .exec(self)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn set_playlist_tracks(
+        &self,
+        playlist_id: &str,
+        tracks: &[full::PostTrack],
+    ) -> anyhow::Result<()> {
+        use ActiveValue::Set;
+
+        entity::PlaylistTrack::delete_many()
+            .filter(col::PlaylistTrack::PlaylistId.eq(playlist_id))
+            .exec(self)
+            .await?;
+
+        let rows: Vec<active_model::PlaylistTrack> = tracks
+            .iter()
+            .filter(|t| t.track.track.spotify_id.is_some())
+            .map(|t| active_model::PlaylistTrack {
+                playlist_id: Set(playlist_id.to_string()),
+                post_url: Set(t.post_track.post_url.clone()),
+                post_track_number: Set(t.post_track.post_track_number),
+                track_id: Set(t.post_track.track_id.clone()),
+            })
+            .collect();
+
+        if !rows.is_empty() {
+            entity::PlaylistTrack::insert_many(rows).exec(self).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn post_track_playlists(
+        &self,
+        post_track: &model::PostTrack,
+    ) -> anyhow::Result<Vec<String>> {
+        Ok(entity::PlaylistTrack::find()
+            .filter(col::PlaylistTrack::PostUrl.eq(&post_track.post_url))
+            .filter(col::PlaylistTrack::PostTrackNumber.eq(post_track.post_track_number))
+            .select_only()
+            .column(col::PlaylistTrack::PlaylistId)
+            .into_tuple()
+            .all(self)
+            .await?)
     }
 
     async fn update_post_track(
@@ -1223,6 +1402,7 @@ impl<T: ConnectionTrait> CustomQueries for T {
 const MIGRATIONS: &[&str] = &[
     include_str!("db/migrations/001-init.sql"),
     include_str!("db/migrations/002-playlist-deleted-column.sql"),
+    include_str!("db/migrations/003-playlist-kinds.sql"),
 ];
 
 async fn migrate(conn: &mut Db, version: usize, sql: &str) -> anyhow::Result<()> {
