@@ -83,8 +83,7 @@ trait InspectClientError {
     async fn inspect_client_error(self) -> Self::Output;
 }
 
-impl<T: Send + Sync + Sized> InspectClientError for anyhow::Result<T, ClientError>
-{
+impl<T: Send + Sync + Sized> InspectClientError for anyhow::Result<T, ClientError> {
     type Output = anyhow::Result<T>;
 
     async fn inspect_client_error(self) -> anyhow::Result<T> {
@@ -246,7 +245,8 @@ impl Client {
                 None,
             )
             .await
-            .inspect_client_error().await
+            .inspect_client_error()
+            .await
             .with_context(|| format!("searching track: {}", title))?;
 
         let SearchResult::Tracks(tracks) = result else {
@@ -424,7 +424,13 @@ impl Client {
             .await
             .context("deleting playlist from the database");
 
-        if let Err(e) = self.spotify.library_remove([pl.library_id()]).await.inspect_client_error().await {
+        if let Err(e) = self
+            .spotify
+            .library_remove([pl.library_id()])
+            .await
+            .inspect_client_error()
+            .await
+        {
             tracing::error!(
                 "failed deleting post {} playlist ({}) from spotify: {}",
                 &pl.post_url,
@@ -434,6 +440,23 @@ impl Client {
         };
 
         let _ = db_res?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn set_playlist_user_deleted(
+        &self,
+        db: &Db,
+        pl: &mut model::Playlist,
+    ) -> anyhow::Result<()> {
+        use crate::db::{ColumnTrait, EntityTrait, Expr, QueryFilter, col, entity};
+        let _ = entity::Playlist::update_many()
+            .col_expr(col::Playlist::UserDeleted, Expr::value(true))
+            .filter(col::Playlist::Id.eq(&pl.id))
+            .exec(db)
+            .await?;
+
+        pl.user_deleted = true;
 
         Ok(())
     }
@@ -463,6 +486,10 @@ impl Client {
         }
 
         let pl = match &mut data.playlist {
+            Some(pl) if pl.user_deleted => {
+                tracing::info!("skipping deleted playlist {}", pl.id);
+                return Ok(());
+            }
             Some(pl) => {
                 let exp_name = data.post.playlist_name();
 
@@ -485,11 +512,12 @@ impl Client {
                         .await
                     {
                         if e.is_404() {
-                            tracing::warn!(
+                            tracing::info!(
                                 "post {} playlist ({}) has been deleted",
                                 &data.post.url,
                                 &pl.id
                             );
+                            self.set_playlist_user_deleted(db, pl).await?;
                             return Ok(());
                         }
 
@@ -517,11 +545,11 @@ impl Client {
     async fn update_playlist_tracks(
         &self,
         db: &Db,
-        playlist: &model::Playlist,
+        playlist: &mut model::Playlist,
         tracks: &mut [full::PostTrack],
     ) -> anyhow::Result<()> {
         let post_url = &playlist.post_url;
-        let plid = playlist.spotify_playlist_id();
+        let plid = playlist.spotify_playlist_id().into_static();
 
         let local_items: Vec<_> = tracks
             .iter()
@@ -550,8 +578,8 @@ impl Client {
                     }
                     Ok(None) => break,
                     Err(e) if e.is_404() => {
-                        // TODO: need better handling of this...
-                        tracing::warn!("playlist ({plid}) for post {post_url} has been deleted");
+                        tracing::info!("playlist ({plid}) for post {post_url} has been deleted");
+                        self.set_playlist_user_deleted(db, playlist).await?;
                         return Ok(());
                     }
                     Err(e) => anyhow::bail!(e),

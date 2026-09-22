@@ -739,6 +739,11 @@ pub(crate) mod playlist {
         pub created_at: DateTime,
         pub updated_at: DateTime,
 
+        // used to mark playlists that have been deleted from spotify because
+        // I listened to them and chose not to keep them around
+        #[sea_orm(indexed)]
+        pub user_deleted: bool,
+
         #[sea_orm(indexed, unique)]
         pub post_url: String,
 
@@ -1186,7 +1191,7 @@ impl<T: ConnectionTrait> CustomQueries for T {
         id: &str,
         name: &str,
     ) -> anyhow::Result<model::Playlist> {
-        use ActiveValue::Set;
+        use ActiveValue::{NotSet, Set};
 
         let now = chrono::Utc::now();
 
@@ -1196,6 +1201,7 @@ impl<T: ConnectionTrait> CustomQueries for T {
             name: Set(name.to_string()),
             created_at: Set(now),
             updated_at: Set(now),
+            user_deleted: NotSet,
         }
         .upsert(self)
         .await?)
@@ -1214,7 +1220,10 @@ impl<T: ConnectionTrait> CustomQueries for T {
     }
 }
 
-const MIGRATIONS: &[&str] = &[include_str!("db/migrations/001-init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("db/migrations/001-init.sql"),
+    include_str!("db/migrations/002-playlist-deleted-column.sql"),
+];
 
 async fn migrate(conn: &mut Db, version: usize, sql: &str) -> anyhow::Result<()> {
     let tx = conn.begin().await?;
