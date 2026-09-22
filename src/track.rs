@@ -204,7 +204,7 @@ impl Match {
         row.track.track.spotify_id = None;
         row.track.track.spotify_match_score = None;
 
-        let (new_id, new_score) = match spotify.search(&row.track).await? {
+        let (new_id, new_score) = match spotify.search(&app.db, &row.track).await? {
             Some((id, score)) => (Some(id), Some(score)),
             None => (None, None),
         };

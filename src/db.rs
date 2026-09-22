@@ -41,10 +41,35 @@ use std::collections::HashMap;
 
 use crate::bandcamp;
 use crate::query::TrackQuery;
-use crate::types::DateTime;
+use crate::search::MatchResult;
+use crate::types::{DateTime, SpotifyTrack};
 
 mod types {
     use super::*;
+
+    pub(crate) use string_list::StringList;
+    pub(crate) mod string_list {
+        use super::*;
+
+        #[derive(
+            Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult,
+        )]
+        pub struct StringList(pub Vec<String>);
+
+        impl std::ops::Deref for StringList {
+            type Target = Vec<String>;
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+
+        impl<T: ToString> FromIterator<T> for StringList {
+            fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+                Self(iter.into_iter().map(|s| s.to_string()).collect())
+            }
+        }
+    }
 
     pub(crate) use map::Map;
     pub(crate) mod map {
@@ -911,6 +936,117 @@ pub(crate) mod playlist_track {
     }
 }
 
+pub(crate) mod search_candidate {
+    use super::types::StringList;
+    use super::*;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize)]
+    #[sea_orm(table_name = "spotify_track_search_candidates")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: String,
+
+        pub title: String,
+        pub artists: StringList,
+        pub album: String,
+        pub track_number: u32,
+        pub duration: f64,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+
+    impl super::traits::Upsert for ActiveModel {
+        fn on_upsert_conflict() -> OnConflict {
+            use Column::*;
+
+            OnConflict::column(Id)
+                .update_columns([Title, Artists, Album, TrackNumber, Duration])
+                .to_owned()
+        }
+    }
+}
+
+pub(crate) mod track_search {
+    use super::*;
+    use crate::search::{MatchResult, Rejection};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize)]
+    #[sea_orm(
+        rs_type = "String",
+        db_type = "String(StringLen::None)",
+        rename_all = "snake_case"
+    )]
+    pub(crate) enum Outcome {
+        Match,
+        NoResults,
+        WrongVersion,
+        WrongDuration,
+        WrongTitle,
+        WrongArtist,
+    }
+
+    impl From<&MatchResult> for Outcome {
+        fn from(result: &MatchResult) -> Self {
+            match result {
+                MatchResult::Match(_) => Self::Match,
+                MatchResult::Reject(_, Rejection::Version) => Self::WrongVersion,
+                MatchResult::Reject(_, Rejection::Duration(_)) => Self::WrongDuration,
+                MatchResult::Reject(_, Rejection::Title(_)) => Self::WrongTitle,
+                MatchResult::Reject(_, Rejection::Artist(_)) => Self::WrongArtist,
+            }
+        }
+    }
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize)]
+    #[sea_orm(table_name = "spotify_track_searches")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub track_id: String,
+
+        #[sea_orm(indexed)]
+        pub searched_at: DateTime,
+        pub search_count: u32,
+        pub candidates: u32,
+
+        #[sea_orm(indexed)]
+        pub result: Outcome,
+
+        #[sea_orm(indexed)]
+        pub best_match_id: Option<String>,
+        pub best_match_score: Option<f64>,
+
+        pub prev_result: Option<Outcome>,
+        pub prev_match_id: Option<String>,
+        pub prev_match_score: Option<f64>,
+
+        #[sea_orm(belongs_to, from = "track_id", to = "id")]
+        pub track: BelongsTo<super::track::Entity>,
+
+        #[sea_orm(belongs_to, from = "best_match_id", to = "id")]
+        pub best_match: BelongsTo<Option<super::search_candidate::Entity>>,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+
+    impl super::traits::Upsert for ActiveModel {
+        fn on_upsert_conflict() -> OnConflict {
+            use Column::*;
+
+            OnConflict::column(TrackId)
+                .update_columns([SearchedAt, Candidates, Result, BestMatchId, BestMatchScore])
+                .values([
+                    (SearchCount, Expr::col((Entity, SearchCount)).add(1)),
+                    (PrevResult, Expr::col((Entity, Result))),
+                    (PrevMatchId, Expr::col((Entity, BestMatchId))),
+                    (PrevMatchScore, Expr::col((Entity, BestMatchScore))),
+                ])
+                .to_owned()
+        }
+    }
+}
+
 pub(crate) mod model {
     pub use super::{
         artist::Model as Artist, playlist::Model as Playlist, post::Model as Post,
@@ -925,7 +1061,9 @@ pub(crate) mod entity {
         artist::Entity as Artist, playlist::Entity as Playlist,
         playlist_track::Entity as PlaylistTrack, post::Entity as Post,
         post_scrape::Entity as Scrape, post_short_id::Entity as PostShortId,
-        post_track::Entity as PostTrack, release::Entity as Release, track::Entity as Track,
+        post_track::Entity as PostTrack, release::Entity as Release,
+        search_candidate::Entity as SearchCandidate, track::Entity as Track,
+        track_search::Entity as TrackSearch,
     };
 }
 
@@ -945,7 +1083,8 @@ pub(crate) mod active_model {
         playlist_track::ActiveModel as PlaylistTrack, post::ActiveModel as Post,
         post_scrape::ActiveModel as Scrape, post_short_id::ActiveModel as PostShortId,
         post_track::ActiveModel as PostTrack, release::ActiveModel as Release,
-        track::ActiveModel as Track,
+        search_candidate::ActiveModel as SearchCandidate, track::ActiveModel as Track,
+        track_search::ActiveModel as TrackSearch,
     };
 }
 
@@ -1275,6 +1414,12 @@ pub(crate) trait CustomQueries {
         &self,
         post_track: &model::PostTrack,
     ) -> anyhow::Result<Vec<String>>;
+    async fn record_track_search(
+        &self,
+        track_id: &str,
+        candidates: u32,
+        best: Option<(&str, &SpotifyTrack, MatchResult)>,
+    ) -> anyhow::Result<()>;
 }
 
 impl<T: ConnectionTrait> CustomQueries for T {
@@ -1386,6 +1531,45 @@ impl<T: ConnectionTrait> CustomQueries for T {
             .await?)
     }
 
+    async fn record_track_search(
+        &self,
+        track_id: &str,
+        candidates: u32,
+        best: Option<(&str, &SpotifyTrack, MatchResult)>,
+    ) -> anyhow::Result<()> {
+        use ActiveValue::Set;
+
+        let mut search = track_search::ActiveModel {
+            track_id: Set(track_id.to_string()),
+            searched_at: Set(chrono::Utc::now()),
+            search_count: Set(1),
+            candidates: Set(candidates),
+            result: Set(track_search::Outcome::NoResults),
+            ..Default::default()
+        };
+
+        if let Some((spotify_id, found, result)) = best {
+            search_candidate::ActiveModel {
+                id: Set(spotify_id.to_string()),
+                title: Set(found.name.clone()),
+                artists: Set(found.artists.iter().map(|artist| &artist.name).collect()),
+                album: Set(found.album.name.clone()),
+                track_number: Set(found.track_number),
+                duration: Set(found.duration.to_std().unwrap_or_default().as_secs_f64()),
+            }
+            .upsert(self)
+            .await?;
+
+            search.result = Set(track_search::Outcome::from(&result));
+            search.best_match_id = Set(Some(spotify_id.to_string()));
+            search.best_match_score = Set(Some(result.score()));
+        }
+
+        search.upsert(self).await?;
+
+        Ok(())
+    }
+
     async fn update_post_track(
         &self,
         post_track: &model::PostTrack,
@@ -1403,6 +1587,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("db/migrations/001-init.sql"),
     include_str!("db/migrations/002-playlist-deleted-column.sql"),
     include_str!("db/migrations/003-playlist-kinds.sql"),
+    include_str!("db/migrations/004-track-searches.sql"),
 ];
 
 async fn migrate(conn: &mut Db, version: usize, sql: &str) -> anyhow::Result<()> {

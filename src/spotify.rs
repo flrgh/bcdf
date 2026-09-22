@@ -16,6 +16,7 @@ use crate::db::{
 };
 use crate::metrics;
 use crate::search::{MatchResult, TrackArtists, TrackMatcher, TrackTitle};
+use crate::types::SpotifyTrack;
 
 #[derive(Debug)]
 pub(crate) struct Client {
@@ -285,6 +286,7 @@ impl Client {
     )]
     pub(crate) async fn search(
         &self,
+        db: &Db,
         track: &full::Track,
     ) -> anyhow::Result<Option<(String, f64)>> {
         fn track_queries(track: &model::Track, artist: &model::Artist) -> Vec<TrackQuery> {
@@ -313,7 +315,8 @@ impl Client {
 
         let tm = TrackMatcher::from_track(track);
         let mut seen = 0;
-        let mut nearest: Option<MatchResult> = None;
+        let mut candidates = HashSet::new();
+        let mut nearest: Option<(MatchResult, SpotifyTrack, String)> = None;
 
         let queries = track_queries(&track.track, &track.artist);
         for (attempt, query) in queries.into_iter().enumerate() {
@@ -331,19 +334,21 @@ impl Client {
                     continue;
                 };
 
+                let id = id.to_string();
+                candidates.insert(id.clone());
+
                 let res = tm.score(&result);
 
                 if let Some(score) = res.matched() {
-                    let id = id.clone();
                     matched.push((score, result, id));
                     continue;
                 }
 
                 if nearest
                     .as_ref()
-                    .is_none_or(|prev| res.score() > prev.score())
+                    .is_none_or(|(prev, ..)| res.score() > prev.score())
                 {
-                    nearest.replace(res);
+                    nearest = Some((res, result, id));
                 }
             }
 
@@ -355,8 +360,6 @@ impl Client {
                 tracing::debug!(candidates = num_results, "no candidate was a match");
                 continue;
             };
-
-            let id = id.to_string();
 
             tracing::info!(
                 id = %id,
@@ -372,13 +375,29 @@ impl Client {
 
             metrics::inc(metrics::TracksDiscoveredOnSpotify, 1);
 
+            db.record_track_search(
+                &track.track.id,
+                candidates.len() as u32,
+                Some((&id, &best, MatchResult::Match(score))),
+            )
+            .await?;
+
             return Ok(Some((id, score)));
         }
 
-        match nearest {
-            Some(nearest) => tracing::info!(results = seen, closest = %nearest, "no match"),
-            None => tracing::info!(results = seen, "no match: Spotify returned nothing"),
-        }
+        let best = match &nearest {
+            Some((result, found, id)) => {
+                tracing::info!(results = seen, closest = %result, "no match");
+                Some((id.as_str(), found, result.clone()))
+            }
+            None => {
+                tracing::info!(results = seen, "no match: Spotify returned nothing");
+                None
+            }
+        };
+
+        db.record_track_search(&track.track.id, candidates.len() as u32, best)
+            .await?;
 
         Ok(None)
     }
@@ -390,7 +409,7 @@ impl Client {
                 continue;
             }
 
-            match self.search(track).await.context("searching track") {
+            match self.search(db, track).await.context("searching track") {
                 Err(e) => {
                     tracing::error!(
                         track = %track.track.title,

@@ -661,29 +661,41 @@ impl From<&SpotifyTrack> for MatchParams {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Rejection {
+    Version,
+    Duration(Duration),
+    Title(f64),
+    Artist(f64),
+}
+
+impl std::fmt::Display for Rejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Version => write!(f, "a different version"),
+            Self::Duration(diff) => write!(f, "duration differs by {diff:?}"),
+            Self::Title(score) => write!(f, "title scored {score:.1}"),
+            Self::Artist(score) => write!(f, "artist scored {score:.1}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum MatchResult {
     Match(f64),
-    WrongVersion,
-    WrongDuration(Duration),
-    WrongTitle(f64),
-    WrongArtist(f64),
+    Reject(f64, Rejection),
 }
 
 impl MatchResult {
     pub(crate) fn matched(&self) -> Option<f64> {
         match self {
             Self::Match(score) => Some(*score),
-            Self::WrongVersion
-            | Self::WrongDuration(_)
-            | Self::WrongTitle(_)
-            | Self::WrongArtist(_) => None,
+            Self::Reject(..) => None,
         }
     }
 
     pub(crate) fn score(&self) -> f64 {
         match self {
-            Self::Match(score) | Self::WrongTitle(score) | Self::WrongArtist(score) => *score,
-            Self::WrongVersion | Self::WrongDuration(_) => 0.0,
+            Self::Match(score) | Self::Reject(score, _) => *score,
         }
     }
 }
@@ -692,10 +704,7 @@ impl std::fmt::Display for MatchResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Match(score) => write!(f, "matched at {score:.1}"),
-            Self::WrongVersion => write!(f, "a different version"),
-            Self::WrongDuration(diff) => write!(f, "duration differs by {diff:?}"),
-            Self::WrongTitle(score) => write!(f, "title scored {score:.1}"),
-            Self::WrongArtist(score) => write!(f, "artist scored {score:.1}"),
+            Self::Reject(score, reason) => write!(f, "{reason}, scored {score:.1}"),
         }
     }
 }
@@ -788,13 +797,16 @@ impl TrackMatcher {
         let composite = (weighted / self.max_possible() as f64) * 100.0;
 
         let result = if !self.title.same_version(&params.title) {
-            MatchResult::WrongVersion
+            MatchResult::Reject(composite, Rejection::Version)
         } else if duration.is_none() {
-            MatchResult::WrongDuration(self.duration.abs_diff(params.duration))
+            MatchResult::Reject(
+                composite,
+                Rejection::Duration(self.duration.abs_diff(params.duration)),
+            )
         } else if title < MIN_TITLE_SCORE {
-            MatchResult::WrongTitle(title)
+            MatchResult::Reject(composite, Rejection::Title(title))
         } else if artist < MIN_ARTIST_SCORE {
-            MatchResult::WrongArtist(artist)
+            MatchResult::Reject(composite, Rejection::Artist(artist))
         } else {
             MatchResult::Match(composite)
         };
@@ -1074,9 +1086,11 @@ mod tests {
 
         let matcher = TrackMatcher::from(track);
 
-        assert_eq!(
-            MatchResult::WrongVersion,
-            matcher.score_params(other.into())
+        let score = matcher.score_params(other.into());
+
+        assert!(
+            matches!(score, MatchResult::Reject(_, Rejection::Version)),
+            "expected a version rejection, got {score:?}"
         );
     }
 
@@ -1115,7 +1129,7 @@ mod tests {
         let score = matcher.score_params(params);
 
         assert!(
-            matches!(score, MatchResult::WrongTitle(_)),
+            matches!(score, MatchResult::Reject(_, Rejection::Title(_))),
             "expected a title rejection, got {score:?}"
         );
     }
@@ -1180,7 +1194,7 @@ mod tests {
         let score = matcher.score_params(other.into());
 
         assert!(
-            matches!(score, MatchResult::WrongDuration(_)),
+            matches!(score, MatchResult::Reject(_, Rejection::Duration(_))),
             "expected a duration rejection, got {score:?}"
         );
     }
@@ -1202,7 +1216,7 @@ mod tests {
         let score = matcher.score_params(other.into());
 
         assert!(
-            matches!(score, MatchResult::WrongArtist(_)),
+            matches!(score, MatchResult::Reject(_, Rejection::Artist(_))),
             "expected an artist rejection, got {score:?}"
         );
     }
