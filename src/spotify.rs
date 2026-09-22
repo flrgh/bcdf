@@ -78,13 +78,15 @@ async fn inspect_client_error(e: ClientError) -> anyhow::Error {
     }
 }
 
-trait InspectClientError<T, E> {
-    async fn inspect_client_error(self) -> anyhow::Result<T, E>;
+trait InspectClientError {
+    type Output;
+    async fn inspect_client_error(self) -> Self::Output;
 }
 
-impl<T: Send + Sync + Sized> InspectClientError<T, anyhow::Error>
-    for anyhow::Result<T, ClientError>
+impl<T: Send + Sync + Sized> InspectClientError for anyhow::Result<T, ClientError>
 {
+    type Output = anyhow::Result<T>;
+
     async fn inspect_client_error(self) -> anyhow::Result<T> {
         match self {
             Ok(t) => Ok(t),
@@ -182,12 +184,12 @@ impl Client {
     pub(crate) async fn get_playlist<T: SpotifyPlaylistId>(
         &self,
         t: &T,
-    ) -> anyhow::Result<Option<rspotify::model::FullPlaylist>, ClientError> {
+    ) -> anyhow::Result<Option<rspotify::model::FullPlaylist>> {
         let id = t.playlist_id();
         match self.spotify.playlist(id, None, Some(MARKET)).await {
             Ok(pl) => Ok(Some(pl)),
             Err(e) if e.is_404() => Ok(None),
-            Err(e) => Err(e),
+            Err(e) => Err(e).inspect_client_error().await,
         }
     }
 
@@ -210,7 +212,8 @@ impl Client {
                 Some(&post.url),
             )
             .await
-            .context("creating playlist")?;
+            .inspect_client_error()
+            .await?;
 
         let created = db.upsert_playlist(&post.url, pl.id.id(), &pl.name).await?;
 
@@ -243,6 +246,7 @@ impl Client {
                 None,
             )
             .await
+            .inspect_client_error().await
             .with_context(|| format!("searching track: {}", title))?;
 
         let SearchResult::Tracks(tracks) = result else {
@@ -420,7 +424,7 @@ impl Client {
             .await
             .context("deleting playlist from the database");
 
-        if let Err(e) = self.spotify.library_remove([pl.library_id()]).await {
+        if let Err(e) = self.spotify.library_remove([pl.library_id()]).await.inspect_client_error().await {
             tracing::error!(
                 "failed deleting post {} playlist ({}) from spotify: {}",
                 &pl.post_url,
@@ -489,7 +493,7 @@ impl Client {
                             return Ok(());
                         }
 
-                        anyhow::bail!(e);
+                        return Err(inspect_client_error(e).await);
                     }
 
                     let _ = db.upsert_playlist(&pl.post_url, &pl.id, &exp_name).await?;
@@ -630,8 +634,6 @@ impl Cli {
                 let playlist = match query {
                     PlaylistQuery::Id(id) => client
                         .get_playlist(&id)
-                        .await
-                        .inspect_client_error()
                         .await?
                         .ok_or_else(|| anyhow::anyhow!("playlist not found"))?,
                 };
