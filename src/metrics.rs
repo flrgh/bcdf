@@ -59,4 +59,10 @@ pub(crate) fn summarize() -> Metrics {
     metrics().clone()
 }
 
+pub(crate) fn print() {
+    for (metric, value) in summarize() {
+        println!("{metric:width$} => {value}", width = &MAX_STRING_WIDTH);
+    }
+}
+
 pub(crate) use Metric::*;

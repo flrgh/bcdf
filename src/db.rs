@@ -34,7 +34,7 @@ pub(crate) use sea_orm::{
     TransactionTrait,
     //TryIntoModel as _,
     entity::prelude::*,
-    sea_query::{ExprTrait as _, Func, OnConflict},
+    sea_query::{ExprTrait, Func, OnConflict},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -598,6 +598,9 @@ pub(crate) mod track {
 
         #[sea_orm(has_many)]
         pub post_tracks: HasMany<super::post_track::Entity>,
+
+        #[sea_orm(has_one)]
+        pub search_result: HasOne<super::track_search::Entity>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -643,6 +646,32 @@ pub(crate) mod track {
 
         pub fn spotify_playable_id(&self) -> Option<PlayableId<'_>> {
             self.spotify_track_id().map(PlayableId::Track)
+        }
+    }
+
+    impl Entity {
+        pub async fn update_spotify(
+            db: &Db,
+            track_id: &str,
+            spotify_id: Option<String>,
+            score: Option<f64>,
+        ) -> anyhow::Result<()> {
+            let tx = db.begin().await?;
+            let res = Entity::update_many()
+                .filter(col::Track::Id.eq(track_id))
+                .col_expr(col::Track::SpotifyId, Expr::value(spotify_id))
+                .col_expr(col::Track::SpotifyMatchScore, Expr::value(score))
+                .exec(&tx)
+                .await?;
+
+            if res.rows_affected != 1 {
+                let _ = tx.rollback().await;
+                anyhow::bail!("update would have affected {} rows", res.rows_affected);
+            }
+
+            tx.commit().await?;
+
+            Ok(())
         }
     }
 }
@@ -1045,6 +1074,15 @@ pub(crate) mod track_search {
                 .to_owned()
         }
     }
+
+    impl Model {
+        pub fn matched(&self) -> Option<(&str, f64)> {
+            match (self.result, &self.best_match_id, self.best_match_score) {
+                (Outcome::Match, Some(id), Some(score)) => Some((id.as_str(), score)),
+                _ => None,
+            }
+        }
+    }
 }
 
 pub(crate) mod model {
@@ -1073,7 +1111,12 @@ pub(crate) mod col {
         playlist_track::Column as PlaylistTrack, post::Column as Post,
         post_scrape::Column as Scrape, post_short_id::Column as PostShortId,
         post_track::Column as PostTrack, release::Column as Release, track::Column as Track,
+        track_search::Column as TrackSearch,
     };
+}
+
+pub(crate) mod rel {
+    pub(crate) use super::track::Relation as Track;
 }
 
 pub(crate) mod active_model {

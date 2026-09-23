@@ -1,4 +1,5 @@
 use anyhow::Context;
+use clap::Subcommand;
 
 use crate::db::{Apply as _, LimitIf as _};
 use crate::db::{
@@ -8,10 +9,30 @@ use crate::db::{
 };
 use crate::{bandcamp, http, metrics, spotify};
 
-/// Scrape new posts, download their mp3s, and update Spotify playlists
 #[derive(clap::Args, Debug)]
 #[group(id = "scan")]
 pub(crate) struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    Posts(Posts),
+    Tracks(Tracks),
+}
+
+impl Cli {
+    pub(crate) async fn exec(self, app: &crate::App) -> anyhow::Result<()> {
+        match self.command {
+            Command::Posts(posts) => posts.exec(app).await,
+            Command::Tracks(tracks) => tracks.exec(app).await,
+        }
+    }
+}
+
+#[derive(clap::Args, Debug)]
+struct Opts {
     /// Don't download anything
     #[arg(long, global = true, default_value_t = false)]
     no_download: bool,
@@ -27,6 +48,86 @@ pub(crate) struct Cli {
     /// alias for --no-playlists + --no-search
     #[arg(long, global = true, default_value_t = false)]
     no_spotify: bool,
+}
+
+#[derive(clap::Args, Debug)]
+#[group(id = "scan-tracks")]
+pub(crate) struct Tracks {
+    #[arg(long, global = true, default_value_t = false)]
+    backfill_search: bool,
+
+    #[arg(short = 'n', long, default_value_t = 100)]
+    limit: u16,
+}
+
+impl Tracks {
+    pub(crate) async fn exec(self, app: &crate::App) -> anyhow::Result<()> {
+        use crate::db::{
+            Condition, JoinType, QueryOrder, QuerySelect,
+            RelationTrait, col, entity, rel, views,
+        };
+
+        let spotify = spotify::connect().await?;
+
+        let cond = if self.backfill_search {
+            Condition::all()
+                .add(col::Track::SpotifyId.is_not_null())
+                .add(
+                    Condition::any()
+                        .add(col::Track::SpotifyMatchScore.is_null())
+                        .add(col::TrackSearch::TrackId.is_null())
+                        .to_owned(),
+                )
+                .to_owned()
+        } else {
+            Condition::all()
+                .add(col::Track::SpotifyId.is_null())
+                .add(col::TrackSearch::TrackId.is_null())
+                .to_owned()
+        };
+
+        let tracks = views::PostTrackAll::select()
+            .join(JoinType::FullOuterJoin, rel::Track::TrackSearch.def())
+            .filter(cond)
+            .order_by_desc(col::Post::PublishedAt)
+            .limit(self.limit as u64)
+            .into_partial_model::<views::PostTrackAll>()
+            .all(&app.db)
+            .await?;
+
+        for row in tracks.into_iter() {
+            let track = row.track;
+
+            metrics::inc(metrics::TracksSeen, 1);
+            println!("{} -> {}", track.track.id, track.track.title);
+
+            let (id, score) = if self.backfill_search {
+                spotify.re_score_matched_track(&app.db, &track).await?
+            } else {
+                match spotify.search(&app.db, &track).await? {
+                    Some((id, score)) => (Some(id), Some(score)),
+                    None => (None, None),
+                }
+            };
+
+            if track.track.spotify_id != id || track.track.spotify_match_score != score {
+                eprintln!("updating track spotify_id: {id:?}, score: {score:?}");
+                entity::Track::update_spotify(&app.db, &track.track.id, id, score).await?;
+            }
+        }
+
+        metrics::print();
+
+        Ok(())
+    }
+}
+
+/// Scrape new posts, download their mp3s, and update Spotify playlists
+#[derive(clap::Args, Debug)]
+#[group(id = "scan-posts")]
+pub(crate) struct Posts {
+    #[command(flatten)]
+    opts: Opts,
 
     /// re-scrape post html even if existing scrape data exists
     #[arg(long, global = true, default_value_t = false)]
@@ -177,11 +278,11 @@ impl crate::App {
     }
 }
 
-impl Cli {
+impl Posts {
     pub(crate) async fn exec(mut self, app: &crate::App) -> anyhow::Result<()> {
-        if self.no_spotify {
-            self.no_search = true;
-            self.no_playlists = true;
+        if self.opts.no_spotify {
+            self.opts.no_search = true;
+            self.opts.no_playlists = true;
         }
 
         let single_post = self.url.is_some();
@@ -193,8 +294,8 @@ impl Cli {
 
             let mut cond = Condition::any();
 
-            let search = !self.no_search;
-            let download = !self.no_download;
+            let search = !self.opts.no_search;
+            let download = !self.opts.no_download;
 
             if search {
                 cond = cond.add(entity::Post::missing_spotify_tracks());
@@ -221,7 +322,7 @@ impl Cli {
             return Ok(());
         }
 
-        let spotify = if self.no_playlists && self.no_search {
+        let spotify = if self.opts.no_playlists && self.opts.no_search {
             None
         } else {
             Some(spotify::connect().await?)
@@ -272,27 +373,22 @@ impl Cli {
             metrics::inc(metrics::TracksSeen, post.tracks.len());
 
             if let Some(spotify) = &spotify {
-                if !self.no_search {
+                if !self.opts.no_search {
                     spotify.match_tracks(&app.db, &mut post).await?;
                 }
 
-                if !self.no_playlists {
+                if !self.opts.no_playlists {
                     spotify.update_post_playlist(&app.db, &mut post).await?;
                 }
             }
 
-            if !self.no_download {
+            if !self.opts.no_download {
                 app.download(&mut post).await?;
                 app.tag(&post).await?;
             }
         }
 
-        for (metric, value) in metrics::summarize() {
-            println!(
-                "{metric:width$} => {value}",
-                width = &metrics::MAX_STRING_WIDTH
-            );
-        }
+        metrics::print();
 
         Ok(())
     }

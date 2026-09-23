@@ -402,6 +402,57 @@ impl Client {
         Ok(None)
     }
 
+    pub(crate) async fn re_score_matched_track(
+        &self,
+        db: &Db,
+        track: &full::Track,
+    ) -> anyhow::Result<(Option<String>, Option<f64>)> {
+        let Some(spid) = track.track.spotify_track_id() else {
+            anyhow::bail!("got a track with no spotify id");
+        };
+
+        use crate::db::{ModelTrait, entity};
+        if let Some(search) = track
+            .track
+            .find_related(entity::TrackSearch)
+            .one(db)
+            .await?
+            && let Some((id, score)) = search.matched()
+        {
+            tracing::info!("found existing (matched) search for this track");
+            return Ok((Some(id.to_string()), Some(score)));
+        }
+
+        let sptrack = self.spotify.track(spid.as_ref(), Some(MARKET)).await?;
+        match &sptrack.id {
+            None => anyhow::bail!("spotify track in response for {spid} has no id"),
+            Some(id) if *id != spid => {
+                tracing::warn!("spotify track id mismatch. requested: {spid}, got: {id}");
+                return Ok(match self.search(db, track).await? {
+                    Some((id, score)) => (Some(id), Some(score)),
+                    None => (None, None),
+                });
+            }
+            _ => {}
+        }
+
+        let tm = TrackMatcher::from_track(track);
+        let res = tm.score(&sptrack);
+        let score = res.score();
+        let matched = res.matched().is_some();
+        let spid = spid.to_string();
+        let best = (spid.as_str(), &sptrack, res);
+
+        db.record_track_search(&track.track.id, 1, Some(best))
+            .await?;
+
+        Ok(if matched {
+            (Some(spid), Some(score))
+        } else {
+            (None, None)
+        })
+    }
+
     pub(crate) async fn match_tracks(&self, db: &Db, data: &mut full::Post) -> anyhow::Result<()> {
         for post_track in data.tracks.iter_mut() {
             let track = &mut post_track.track;
