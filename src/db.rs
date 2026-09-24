@@ -9,7 +9,6 @@ pub(crate) use sea_orm::{
     Database,
     DatabaseConnection as Db,
     //DatabaseTransaction as Transaction,
-    DbBackend,
     DerivePartialModel,
     //EntityLoaderTrait as _,
     EntityTrait,
@@ -1120,7 +1119,7 @@ pub(crate) mod col {
 }
 
 pub(crate) mod rel {
-    pub(crate) use super::{post_track::Relation as PostTrack, track::Relation as Track};
+    pub(crate) use super::track::Relation as Track;
 }
 
 pub(crate) mod active_model {
@@ -1635,6 +1634,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("db/migrations/002-playlist-deleted-column.sql"),
     include_str!("db/migrations/003-playlist-kinds.sql"),
     include_str!("db/migrations/004-track-searches.sql"),
+    include_str!("db/migrations/005-short-spotify-ids.sql"),
 ];
 
 async fn migrate(conn: &mut Db, version: usize, sql: &str) -> anyhow::Result<()> {

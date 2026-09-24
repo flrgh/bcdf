@@ -12,9 +12,7 @@ use rspotify::{
 
 use crate::db::{
     ColumnTrait, CustomQueries as _, Db, EntityTrait as _, QueryFilter, col, entity, full, model,
-    playlist,
-    playlist::{Kind, Status},
-    traits::SpotifyPlaylistId,
+    playlist, playlist::Status, traits::SpotifyPlaylistId,
 };
 use crate::metrics;
 use crate::search::{MatchResult, TrackArtists, TrackMatcher, TrackTitle};
@@ -342,7 +340,7 @@ impl Client {
                     continue;
                 };
 
-                let id = id.to_string();
+                let id = id.id().to_owned();
                 candidates.insert(id.clone());
 
                 let res = tm.score(&result);
@@ -448,7 +446,7 @@ impl Client {
         let res = tm.score(&sptrack);
         let score = res.score();
         let matched = res.matched().is_some();
-        let spid = spid.to_string();
+        let spid = spid.id().to_owned();
         let best = (spid.as_str(), &sptrack, res);
 
         db.record_track_search(&track.track.id, 1, Some(best))
@@ -524,7 +522,7 @@ impl Client {
             return Ok(());
         };
 
-        self.retire_playlist(db, &pl).await?;
+        self.retire_playlist(db, pl).await?;
 
         pl.status = Status::Retired;
 

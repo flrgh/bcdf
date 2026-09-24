@@ -5,14 +5,12 @@ use indexmap::IndexSet;
 use rspotify::prelude::{Id, OAuthClient as _};
 
 use crate::bandcamp::category::ALBUM_OF_THE_DAY;
-use crate::db::SpotifyPlaylistId;
 use crate::db::playlist::{Kind, Status};
 use crate::db::{
-    ActiveModelTrait, ActiveValue::*, Apply as _, ColumnTrait as _, Condition, ConnectionTrait,
-    CustomQueries as _, Db, EntityTrait as _, Func, IntoActiveModel, JoinType, LimitIf as _,
-    ModelTrait, Order, QueryFilter as _, QueryOrder, QuerySelect, QueryTrait, RelationTrait,
-    TransactionSession, TransactionTrait, active_model, col, entity, model, post::Urls as _, rel,
-    traits::Upsert, views,
+    ActiveValue::*, Apply as _, ColumnTrait as _, Condition, ConnectionTrait, CustomQueries as _,
+    Db, EntityTrait as _, IntoActiveModel, JoinType, LimitIf as _, QueryFilter as _, QueryOrder,
+    QuerySelect, RelationTrait, TransactionSession, TransactionTrait, active_model, col, entity,
+    model, post::Urls as _, rel, traits::Upsert, views,
 };
 use crate::types::DateTime;
 use crate::{bandcamp, http, metrics, spotify};
