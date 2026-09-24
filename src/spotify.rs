@@ -6,12 +6,14 @@ use futures::stream::TryStreamExt;
 use rspotify::{
     AuthCodeSpotify, ClientError, Credentials,
     http::HttpError,
-    model::{Country, Market, PlaylistId, SearchResult, SearchType, TrackId, UserId},
+    model::{Country, FullPlaylist, Market, PlaylistId, SearchResult, SearchType, TrackId, UserId},
     prelude::*,
 };
 
 use crate::db::{
-    CustomQueries as _, Db, EntityTrait as _, entity, full, model, playlist,
+    ColumnTrait, CustomQueries as _, Db, EntityTrait as _, QueryFilter, col, entity, full, model,
+    playlist,
+    playlist::{Kind, Status},
     traits::SpotifyPlaylistId,
 };
 use crate::metrics;
@@ -20,7 +22,7 @@ use crate::types::SpotifyTrack;
 
 #[derive(Debug)]
 pub(crate) struct Client {
-    spotify: AuthCodeSpotify,
+    pub(crate) spotify: AuthCodeSpotify,
     user: UserId<'static>,
 }
 
@@ -43,10 +45,9 @@ impl Is404 for ClientError {
 }
 
 async fn mark_user_deleted(db: &Db, pl: &mut model::Playlist) -> anyhow::Result<()> {
-    db.set_playlist_status(&pl.id, playlist::Status::UserDeleted)
-        .await?;
+    db.set_playlist_status(&pl.id, Status::UserDeleted).await?;
 
-    pl.status = playlist::Status::UserDeleted;
+    pl.status = Status::UserDeleted;
 
     Ok(())
 }
@@ -207,27 +208,34 @@ impl Client {
 
     pub(crate) async fn create_playlist(
         &self,
+        name: &str,
+        description: Option<&str>,
+    ) -> anyhow::Result<FullPlaylist> {
+        tracing::debug!("creating playlist: {name}");
+
+        self.spotify
+            .user_playlist_create(
+                self.user.clone(),
+                name,
+                Some(false),
+                Some(false),
+                description,
+            )
+            .await
+            .inspect_client_error()
+            .await
+    }
+
+    pub(crate) async fn create_post_playlist(
+        &self,
         db: &Db,
         post: &model::Post,
     ) -> anyhow::Result<model::Playlist> {
         let name = post.playlist_name();
 
-        tracing::debug!("creating playlist: {name}");
+        let pl = self.create_playlist(&name, Some(&post.url)).await?;
 
-        let pl = self
-            .spotify
-            .user_playlist_create(
-                self.user.clone(),
-                &name,
-                Some(false),
-                Some(false),
-                Some(&post.url),
-            )
-            .await
-            .inspect_client_error()
-            .await?;
-
-        let created = db.upsert_playlist(post, pl.id.id(), &pl.name).await?;
+        let created = db.upsert_post_playlist(post, pl.id.id(), &pl.name).await?;
 
         metrics::inc(metrics::SpotifyPlaylistsCreated, 1);
 
@@ -484,7 +492,46 @@ impl Client {
         Ok(())
     }
 
-    async fn delete_playlist(&self, db: &Db, pl: model::Playlist) -> anyhow::Result<()> {
+    pub(crate) async fn retire_playlist(
+        &self,
+        db: &Db,
+        pl: &model::Playlist,
+    ) -> anyhow::Result<()> {
+        tracing::debug!("retiring {} - {}", pl.id, pl.name);
+
+        self.spotify.library_remove([pl.library_id()]).await?;
+
+        db.set_playlist_status(&pl.id, Status::Retired).await?;
+
+        entity::PlaylistTrack::delete_many()
+            .filter(col::PlaylistTrack::PlaylistId.eq(&pl.id))
+            .exec(db)
+            .await?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn retire_post_playlist(
+        &self,
+        db: &Db,
+        data: &mut full::Post,
+    ) -> anyhow::Result<()> {
+        let Some(pl) = &mut data.playlist else {
+            return Ok(());
+        };
+
+        if pl.status != Status::Active {
+            return Ok(());
+        };
+
+        self.retire_playlist(db, &pl).await?;
+
+        pl.status = Status::Retired;
+
+        Ok(())
+    }
+
+    pub(crate) async fn delete_playlist(&self, db: &Db, pl: model::Playlist) -> anyhow::Result<()> {
         let db_res = entity::Playlist::delete_by_id(pl.id.as_str())
             .exec(db)
             .await
@@ -529,6 +576,12 @@ impl Client {
             return self.delete_playlist(db, pl).await;
         }
 
+        if let Some(cat) = &data.post.category
+            && cat == crate::bandcamp::category::ALBUM_OF_THE_DAY
+        {
+            return self.retire_post_playlist(db, data).await;
+        }
+
         let pl = match &mut data.playlist {
             Some(pl) if pl.status != playlist::Status::Active => {
                 tracing::info!("skipping {:?} playlist {}", pl.status, pl.id);
@@ -568,14 +621,16 @@ impl Client {
                         return Err(inspect_client_error(e).await);
                     }
 
-                    let _ = db.upsert_playlist(&data.post, &pl.id, &exp_name).await?;
+                    let _ = db
+                        .upsert_post_playlist(&data.post, &pl.id, &exp_name)
+                        .await?;
                     pl.name = exp_name;
                 }
 
                 pl
             }
             None => {
-                let pl = self.create_playlist(db, &data.post).await?;
+                let pl = self.create_post_playlist(db, &data.post).await?;
                 data.playlist.insert(pl)
             }
         };

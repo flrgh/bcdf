@@ -15,6 +15,7 @@ flate2 = "1.1.9"
 futures = "0.3.34"
 fuzzt = "0.3.1"
 id3 = { version = "1.17.1", features = ["tokio"] }
+indexmap = "2.14.2"
 interim = { version = "0.2.1", default-features = false, features = ["std", "chrono_0_4"] }
 mp3-duration = "0.1.10"
 reqwest = { version = "0.13.4", features = ["stream"] }

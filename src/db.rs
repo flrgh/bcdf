@@ -9,6 +9,7 @@ pub(crate) use sea_orm::{
     Database,
     DatabaseConnection as Db,
     //DatabaseTransaction as Transaction,
+    DbBackend,
     DerivePartialModel,
     //EntityLoaderTrait as _,
     EntityTrait,
@@ -941,6 +942,9 @@ pub(crate) mod playlist_track {
         #[sea_orm(belongs_to, from = "playlist_id", to = "id")]
         pub playlist: BelongsTo<super::playlist::Entity>,
 
+        #[sea_orm(belongs_to, from = "post_url", to = "url")]
+        pub post: BelongsTo<super::post::Entity>,
+
         #[sea_orm(
             belongs_to,
             from = "(post_url, post_track_number, track_id)",
@@ -1116,7 +1120,7 @@ pub(crate) mod col {
 }
 
 pub(crate) mod rel {
-    pub(crate) use super::track::Relation as Track;
+    pub(crate) use super::{post_track::Relation as PostTrack, track::Relation as Track};
 }
 
 pub(crate) mod active_model {
@@ -1441,7 +1445,7 @@ pub(crate) trait CustomQueries {
         post_track: &model::PostTrack,
     ) -> anyhow::Result<model::PostTrack>;
     async fn update_track(&self, track: &model::Track) -> anyhow::Result<model::Track>;
-    async fn upsert_playlist(
+    async fn upsert_post_playlist(
         &self,
         post: &model::Post,
         id: &str,
@@ -1494,7 +1498,7 @@ impl<T: ConnectionTrait> CustomQueries for T {
             .await?)
     }
 
-    async fn upsert_playlist(
+    async fn upsert_post_playlist(
         &self,
         post: &model::Post,
         id: &str,

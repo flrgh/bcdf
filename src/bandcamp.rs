@@ -13,6 +13,10 @@ use crate::types::DateTime;
 pub(crate) const DAILY_BASE_URL: &str = "https://daily.bandcamp.com";
 pub(crate) const FEED_URL: &str = "https://daily.bandcamp.com/feed/";
 
+pub(crate) mod category {
+    pub const ALBUM_OF_THE_DAY: &str = "album-of-the-day";
+}
+
 #[derive(Debug, Clone)]
 struct HtmlSelector(Selector);
 

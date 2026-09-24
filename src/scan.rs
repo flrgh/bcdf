@@ -1,12 +1,20 @@
 use anyhow::Context;
+use chrono::prelude::*;
 use clap::Subcommand;
+use indexmap::IndexSet;
+use rspotify::prelude::{Id, OAuthClient as _};
 
-use crate::db::{Apply as _, LimitIf as _};
+use crate::bandcamp::category::ALBUM_OF_THE_DAY;
+use crate::db::SpotifyPlaylistId;
+use crate::db::playlist::{Kind, Status};
 use crate::db::{
-    ColumnTrait as _, Condition, ConnectionTrait, CustomQueries as _, EntityTrait as _,
-    QueryFilter as _, TransactionSession, TransactionTrait, col, entity, model, post::Urls as _,
+    ActiveModelTrait, ActiveValue::*, Apply as _, ColumnTrait as _, Condition, ConnectionTrait,
+    CustomQueries as _, Db, EntityTrait as _, Func, IntoActiveModel, JoinType, LimitIf as _,
+    ModelTrait, Order, QueryFilter as _, QueryOrder, QuerySelect, QueryTrait, RelationTrait,
+    TransactionSession, TransactionTrait, active_model, col, entity, model, post::Urls as _, rel,
     traits::Upsert, views,
 };
+use crate::types::DateTime;
 use crate::{bandcamp, http, metrics, spotify};
 
 #[derive(clap::Args, Debug)]
@@ -20,6 +28,7 @@ pub(crate) struct Cli {
 enum Command {
     Posts(Posts),
     Tracks(Tracks),
+    Playlists(Playlists),
 }
 
 impl Cli {
@@ -27,6 +36,7 @@ impl Cli {
         match self.command {
             Command::Posts(posts) => posts.exec(app).await,
             Command::Tracks(tracks) => tracks.exec(app).await,
+            Command::Playlists(playlists) => playlists.exec(app).await,
         }
     }
 }
@@ -51,6 +61,240 @@ struct Opts {
 }
 
 #[derive(clap::Args, Debug)]
+#[group(id = "scan-playlists")]
+pub(crate) struct Playlists {
+    #[arg(short = 'n', long, default_value_t = 10)]
+    limit: u16,
+}
+
+fn start_of_month(dt: &DateTime) -> DateTime {
+    dt.with_day(1)
+        .unwrap()
+        .with_hour(0)
+        .unwrap()
+        .with_minute(0)
+        .unwrap()
+        .with_second(0)
+        .unwrap()
+        .with_nanosecond(0)
+        .unwrap()
+}
+
+fn sub_month(dt: &DateTime) -> DateTime {
+    let dt = start_of_month(dt);
+
+    if dt.month() == 1 {
+        dt.with_year(dt.year() - 1).unwrap().with_month(12).unwrap()
+    } else {
+        dt.with_month(dt.month() - 1).unwrap()
+    }
+}
+
+fn add_month(dt: &DateTime) -> DateTime {
+    let dt = start_of_month(dt);
+
+    if dt.month() == 12 {
+        dt.with_year(dt.year() + 1).unwrap().with_month(1).unwrap()
+    } else {
+        dt.with_month(dt.month() + 1).unwrap()
+    }
+}
+
+async fn manage_album_of_the_day(
+    db: &Db,
+    spotify: &crate::spotify::Client,
+    dt: &DateTime,
+) -> anyhow::Result<bool> {
+    let start = start_of_month(dt);
+    let end = add_month(&start);
+
+    let span = tracing::span!(
+        tracing::Level::INFO,
+        "album-of-the-day",
+        month = start.format("%B %Y").to_string(),
+    );
+    let _guard = span.enter();
+
+    let playlist = entity::Playlist::find()
+        .filter(
+            Condition::all()
+                .add(col::Playlist::Kind.eq(Kind::Category))
+                .add(col::Playlist::Category.eq(ALBUM_OF_THE_DAY))
+                .add(col::Playlist::PeriodStart.eq(start))
+                .add(col::Playlist::PeriodEnd.eq(end))
+                .to_owned(),
+        )
+        .one(db)
+        .await?;
+
+    let post_tracks = entity::PostTrack::find()
+        .inner_join(entity::Post)
+        .filter(
+            Condition::all()
+                .add(col::Post::Category.eq(ALBUM_OF_THE_DAY))
+                .add(col::Post::PublishedAt.gte(start))
+                .add(col::Post::PublishedAt.lt(end))
+                .add(col::Track::SpotifyId.is_not_null())
+                .to_owned(),
+        )
+        .find_both_related(entity::Track)
+        .order_by_asc(col::Post::PublishedAt)
+        .order_by_asc(col::Post::Url)
+        .order_by_asc(col::PostTrack::PostTrackNumber)
+        .all(db)
+        .await?;
+
+    let matching: IndexSet<String> = post_tracks
+        .iter()
+        .filter_map(|elem| elem.1.spotify_id.clone())
+        .collect();
+    if matching.is_empty() {
+        tracing::info!("no tracks with spotify matches found");
+        return Ok(false);
+    }
+
+    let mut changed = false;
+
+    if let Some(playlist) = playlist {
+        tracing::info!("playlist exists already");
+        let current_tracks = entity::PlaylistTrack::find()
+            .filter(col::PlaylistTrack::PlaylistId.eq(&playlist.id))
+            .inner_join(entity::Playlist)
+            .inner_join(entity::Post)
+            .find_both_related(entity::Track)
+            .order_by_asc(col::Post::PublishedAt)
+            .order_by_asc(col::Post::Url)
+            .order_by_asc(col::PlaylistTrack::PostTrackNumber)
+            .all(db)
+            .await?
+            .into_iter()
+            .filter_map(|elem| elem.1.spotify_id)
+            .collect::<IndexSet<String>>();
+
+        if matching == current_tracks {
+            tracing::info!("playlist is already up to date");
+        } else {
+            tracing::info!("playlist needs updates");
+            changed = true;
+            for diff in matching.difference(&current_tracks) {
+                tracing::info!("difference: {diff}");
+            }
+        }
+    } else {
+        changed = true;
+        let name = format!("bcdf daily albums: {}", start.format("%y%m"));
+        tracing::info!("creating playlist {name}");
+
+        let desc = format!(
+            "Featured album-of-the-day tracks for {}",
+            start.format("%B %Y")
+        );
+
+        let spl = spotify.create_playlist(&name, Some(desc.as_str())).await?;
+        let id = spl.id.id();
+        let now = chrono::Utc::now();
+        let playlist = model::Playlist {
+            id: id.to_owned(),
+            name,
+            kind: crate::db::playlist::Kind::Category,
+            status: crate::db::playlist::Status::Active,
+            created_at: now,
+            updated_at: now,
+            period_start: start,
+            period_end: end,
+            post_url: None,
+            category: Some(ALBUM_OF_THE_DAY.to_string()),
+        };
+
+        let _ = entity::Playlist::insert(playlist.into_active_model())
+            .exec(db)
+            .await?;
+
+        let items = matching
+            .iter()
+            .map(|id| rspotify::model::TrackId::from_id_or_uri(id).unwrap().into());
+
+        let _ = spotify
+            .spotify
+            .playlist_add_items(spl.id.clone(), items, None)
+            .await?;
+
+        let rows: Vec<active_model::PlaylistTrack> = post_tracks
+            .into_iter()
+            .map(|(post_track, track)| active_model::PlaylistTrack {
+                playlist_id: Set(id.to_owned()),
+                post_url: Set(post_track.post_url),
+                post_track_number: Set(post_track.post_track_number),
+                track_id: Set(track.id),
+            })
+            .collect();
+
+        entity::PlaylistTrack::insert_many(rows).exec(db).await?;
+    }
+
+    let playlists = entity::Playlist::find()
+        .inner_join(entity::Post)
+        .filter(
+            Condition::all()
+                .add(col::Playlist::Kind.eq("post"))
+                .add(col::Playlist::Status.eq(Status::Active))
+                .add(col::Post::Category.eq(ALBUM_OF_THE_DAY))
+                .add(col::Post::PublishedAt.gte(start))
+                .add(col::Post::PublishedAt.lt(end))
+                .to_owned(),
+        )
+        .all(db)
+        .await?;
+
+    tracing::info!("found {} playlists to retire", playlists.len());
+    for pl in playlists {
+        changed = true;
+        assert!(matches!(pl.kind, Kind::Post));
+        spotify.retire_playlist(db, &pl).await?;
+    }
+
+    Ok(changed)
+}
+
+async fn update_album_of_the_day_playlists(db: &Db, limit: usize) -> anyhow::Result<()> {
+    let Some((from, to)): Option<(DateTime, DateTime)> = entity::Post::find()
+        .select_only()
+        .column_as(col::Post::PublishedAt.min(), "min")
+        .column_as(col::Post::PublishedAt.max(), "max")
+        .into_tuple()
+        .one(db)
+        .await?
+    else {
+        tracing::warn!("no posts found??");
+        return Ok(());
+    };
+
+    let spotify = spotify::connect().await?;
+
+    let from = start_of_month(&from);
+    let to = start_of_month(&to);
+
+    let mut time = to;
+    let mut limit = limit;
+    while time > from && limit > 0 {
+        if manage_album_of_the_day(db, &spotify, &time).await? {
+            limit -= 1;
+        }
+
+        time = sub_month(&time);
+    }
+
+    Ok(())
+}
+
+impl Playlists {
+    pub(crate) async fn exec(self, app: &crate::App) -> anyhow::Result<()> {
+        update_album_of_the_day_playlists(&app.db, self.limit as usize).await?;
+        Ok(())
+    }
+}
+
+#[derive(clap::Args, Debug)]
 #[group(id = "scan-tracks")]
 pub(crate) struct Tracks {
     #[arg(long, global = true, default_value_t = false)]
@@ -62,11 +306,6 @@ pub(crate) struct Tracks {
 
 impl Tracks {
     pub(crate) async fn exec(self, app: &crate::App) -> anyhow::Result<()> {
-        use crate::db::{
-            Condition, JoinType, QueryOrder, QuerySelect,
-            RelationTrait, col, entity, rel, views,
-        };
-
         let spotify = spotify::connect().await?;
 
         let cond = if self.backfill_search {
