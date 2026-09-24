@@ -9,8 +9,8 @@ use crate::db::playlist::{Kind, Status};
 use crate::db::{
     ActiveValue::*, Apply as _, ColumnTrait as _, Condition, ConnectionTrait, CustomQueries as _,
     Db, EntityTrait as _, IntoActiveModel, JoinType, LimitIf as _, QueryFilter as _, QueryOrder,
-    QuerySelect, RelationTrait, TransactionSession, TransactionTrait, active_model, col, entity,
-    model, post::Urls as _, rel, traits::Upsert, views,
+    QuerySelect, QueryTrait, RelationTrait, TransactionSession, TransactionTrait, active_model,
+    col, entity, model, post::Urls as _, rel, traits::Upsert, views,
 };
 use crate::types::DateTime;
 use crate::{bandcamp, http, metrics, spotify};
@@ -526,25 +526,44 @@ impl Posts {
 
         let urls = if self.rescan {
             let mut select = entity::Post::find()
+                .left_join(entity::PlaylistTrack)
+                .left_join(entity::Track)
+                .join(
+                    JoinType::FullOuterJoin,
+                    crate::db::post::Relation::Playlist.def(),
+                )
                 .apply(|sel| self.filters.apply_timespec(sel, col::Post::PublishedAt))
-                .limit_if(self.filters.limit());
+                .limit_if(self.filters.limit())
+                .order_by_desc(col::Post::PublishedAt);
 
-            let mut cond = Condition::any();
+            let mut cond = Condition::any().add(
+                Condition::all()
+                    .add(col::Track::SpotifyId.is_not_null())
+                    .add(col::PlaylistTrack::PlaylistId.is_null())
+                    .to_owned(),
+            );
 
             let search = !self.opts.no_search;
             let download = !self.opts.no_download;
 
             if search {
-                cond = cond.add(entity::Post::missing_spotify_tracks());
+                cond = cond.add(col::Track::SpotifyId.is_null());
             }
 
             if download {
-                cond = cond.add(entity::Post::missing_track_downloads());
+                cond = cond.add(col::PostTrack::Filename.is_null());
             }
 
             if !cond.is_empty() {
                 select = select.filter(cond);
             }
+
+            // I cannot for the life of me seem to make `SELECT DISTINCT url`
+            // work w/ sea-orm, so this'll have to do :shrug:
+            let select = entity::Post::find().filter(
+                col::Post::Url
+                    .in_subquery(select.select_only().column(col::Post::Url).into_query()),
+            );
 
             select.urls().all(&app.db).await?
         } else {

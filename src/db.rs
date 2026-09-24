@@ -258,11 +258,17 @@ pub(crate) mod post {
         #[sea_orm(has_one)]
         pub spotify_playlist: HasOne<super::playlist::Entity>,
 
+        #[sea_orm(has_many)]
+        pub playlist_tracks: HasMany<super::playlist_track::Entity>,
+
         #[sea_orm(has_one)]
         pub short_id: HasOne<super::post_short_id::Entity>,
 
         #[sea_orm(has_one)]
         pub scrape: HasOne<super::post_scrape::Entity>,
+
+        #[sea_orm(has_many, via = "post_track")]
+        pub bandcamp_tracks: HasMany<super::track::Entity>,
     }
 
     pub type SelectUrl = sea_orm::Selector<sea_orm::SelectGetableValue<String, Column>>;
@@ -274,45 +280,6 @@ pub(crate) mod post {
     impl Urls for Select<Entity> {
         fn urls(self) -> SelectUrl {
             self.select_only().column(Column::Url).into_values()
-        }
-    }
-
-    impl Entity {
-        pub(crate) fn missing_spotify_tracks() -> Expr {
-            let in_post_playlist = entity::PlaylistTrack::find()
-                .inner_join(entity::Playlist)
-                .filter(col::Playlist::Kind.eq(super::playlist::Kind::Post))
-                .select_only()
-                .column(col::PlaylistTrack::PostUrl)
-                .column(col::PlaylistTrack::PostTrackNumber)
-                .into_query();
-
-            Column::Url.in_subquery(
-                entity::PostTrack::find()
-                    .inner_join(entity::Track)
-                    .filter(
-                        Condition::any().add(col::Track::SpotifyId.is_null()).add(
-                            Expr::tuple([
-                                col::PostTrack::PostUrl.into_simple_expr(),
-                                col::PostTrack::PostTrackNumber.into_simple_expr(),
-                            ])
-                            .not_in_subquery(in_post_playlist),
-                        ),
-                    )
-                    .select_only()
-                    .column(col::PostTrack::PostUrl)
-                    .into_query(),
-            )
-        }
-
-        pub(crate) fn missing_track_downloads() -> Expr {
-            Column::Url.in_subquery(
-                entity::PostTrack::find()
-                    .filter(col::PostTrack::Filename.is_null())
-                    .select_only()
-                    .column(col::PostTrack::PostUrl)
-                    .into_query(),
-            )
         }
     }
 
@@ -601,6 +568,9 @@ pub(crate) mod track {
 
         #[sea_orm(has_one)]
         pub search_result: HasOne<super::track_search::Entity>,
+
+        #[sea_orm(has_many, via = "post_track")]
+        pub posts: HasMany<super::post::Entity>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
